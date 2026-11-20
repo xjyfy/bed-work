@@ -14,7 +14,7 @@ import threading
 
 import webview
 
-from . import applist, store
+from . import applist, store, driver
 from . import files as filex
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,13 @@ tbody tr.sel { background:#cfe6ff !important; }
   <div class="grid2">
     <label>当前设备</label><div id="audioDevice" class="hint">读取中…</div>
     <label>匹配关键字</label><div id="audioKeyword" class="hint">—</div>
+  </div>
+  <div id="driverRow" style="display:none; margin-top:12px; padding:10px 12px; border-radius:8px; background:#fff4e5;">
+    <div style="color:#8a5300"><b>未检测到 VB-CABLE 虚拟声卡</b>：手机语音必须写进虚拟声卡才能当成麦克风用，装好驱动前语音功能是关掉的。</div>
+    <div style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+      <button class="primary" onclick="installDriver(this)">安装虚拟声卡</button>
+      <span class="hint" id="driverHint">需要管理员权限，会弹一次 UAC</span>
+    </div>
   </div>
   <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
     <button onclick="refreshAudio(this)">重新探测声卡</button>
@@ -381,6 +388,34 @@ function renderAudio() {
     dev.innerHTML = `<span style="color:#1b7f3a">●</span> ${esc(a.device || '已就绪')}`;
   } else {
     dev.innerHTML = `<span style="color:#b3261e">○</span> 未就绪（没找到匹配设备，语音已禁用）`;
+  }
+  const row = document.getElementById('driverRow');
+  const hint = document.getElementById('driverHint');
+  if (row) {
+    // 驱动没装才提示；装了但流没打开（关键字/采样率问题）走「重新探测声卡」，不重复引导装驱动
+    const needDriver = a.driver_installed === false;
+    row.style.display = needDriver ? 'block' : 'none';
+  }
+  if (hint && a.driver_can_install === false) {
+    hint.textContent = '当前环境没有随附 VB-CABLE 安装包，请重新运行完整安装包';
+  }
+}
+
+async function installDriver(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '安装中…'; }
+  document.getElementById('driverHint').textContent = '正在安装，可能需要 10~30 秒；如弹出 UAC 请点“是”';
+  try {
+    const res = await pywebview.api.install_vbcable();
+    state.audio = res.audio || state.audio;
+    renderAudio();
+    document.getElementById('subline').textContent = res.ok
+      ? (res.already ? '虚拟声卡已就绪' : '虚拟声卡已安装，语音应该可以用了')
+      : ('安装失败：' + (res.reason || '未知原因'));
+    if (res.ok) { state.audio = Object.assign({}, state.audio, { driver_installed: true }); renderAudio(); }
+  } catch (e) {
+    document.getElementById('subline').textContent = '安装失败：' + (e && e.message ? e.message : e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '安装虚拟声卡'; }
   }
 }
 
@@ -659,7 +694,19 @@ class SettingsApi:
     def refresh_audio(self) -> dict:
         if hasattr(self._service, "refresh_audio"):
             return self._service.refresh_audio()
-        return {"ready": False, "device": "", "keyword": ""}
+        return {"ready": False, "device": "", "keyword": "", "driver_installed": None}
+
+    def install_vbcable(self) -> dict:
+        """「安装虚拟声卡」：调 VB-CABLE 静默安装，装完立刻重新探测一次输出流。"""
+        res = driver.install()
+        if res.get("ok"):
+            # 驱动节点出来后再打开一次输出流，省得用户还要手动点「重新探测声卡」
+            try:
+                self._service.refresh_audio()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("refresh audio after driver install failed: %s", exc)
+        res["audio"] = self._service.audio_status()
+        return res
 
     def list_apps(self) -> list[dict]:
         return applist.cached_entries()

@@ -30,5 +30,11 @@ android-app/local.properties
 # 临时产物
 .tmp/
 
+# 打包产物（安装包与运行目录不入库；依赖 vb-cable / WebView2 引导器要入库）
+pc-service/build/
+pc-service/dist/
+dist-installer/
+*.spec.bak
+
 # 另一个独立仓库（自带 .git）
 remote-mic-app-windows/

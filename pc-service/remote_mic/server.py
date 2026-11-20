@@ -27,6 +27,9 @@ from websockets.asyncio.server import ServerConnection, serve
 from . import screencap
 from . import applist
 from . import files as filex
+from . import driver
+from . import filedialog
+from . import paths
 from .actioner import Actioner
 from .audio_out import AudioOut
 from .store import (
@@ -639,6 +642,19 @@ class RemoteMicService:
         logger.info("push %d file(s) to %s: %s", len(paths), target.name, [os.path.basename(p) for p in paths])
         return {"ok": True, "count": len(paths), "remote": target.name}
 
+    def send_files_from_tray(self) -> None:
+        """托盘右键「发送文件到手机…」：原生多选，然后推给控制中的那台遥控器。"""
+        picked = filedialog.pick_files(max_files=filex.MAX_FILES_PER_BATCH)
+        if not picked:
+            return
+        result = self.send_files_to_remote(picked)
+        if self._tray is None:
+            return
+        if result.get("ok"):
+            self._tray.notify(f"开始发送 {result.get('count', 0)} 个文件到 {result.get('remote', '手机')}")
+        else:
+            self._tray.notify(f"发送失败：{result.get('reason', '未知原因')}")
+
     async def _push_files(self, client: _Client, paths: list[str]) -> None:
         total = len(paths)
         for idx, path in enumerate(paths, start=1):
@@ -743,10 +759,14 @@ class RemoteMicService:
         return self.audio_status()
 
     def audio_status(self) -> dict:
+        st = driver.status()
         return {
             "ready": bool(self._audio.ready),
             "device": self._audio.matched_device,
             "keyword": str(self._config.get("audio_device_keyword", "CABLE Input")),
+            # 虚拟声卡驱动状态：设置页据此决定是否显示「安装虚拟声卡」
+            "driver_installed": st["installed"],
+            "driver_can_install": st["can_install"],
         }
 
     def _request_settings(self) -> None:
@@ -802,6 +822,7 @@ class RemoteMicService:
             on_quit=self.stop,
             on_open_settings=self._request_settings,
             on_switch_remote=self.switch_active,
+            on_send_files=self.send_files_from_tray,
         )
         # 服务与托盘都在后台线程，主线程留给设置窗口（pywebview 只能跑主线程）
         threading.Thread(target=self._run_server, daemon=True).start()
@@ -830,13 +851,15 @@ class RemoteMicService:
 
 
 def _setup_logging() -> None:
-    """日志写文件（pythonw 启动时没有控制台，不能依赖重定向）。"""
-    import os
+    """日志写文件（打包后没有控制台，不能依赖重定向）。
+
+    路径统一走 `%LOCALAPPDATA%\\RemoteMic\\logs`，程序目录只读。
+    """
     import sys
 
-    log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+    log_dir = paths.log_dir()
     os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, "service.log")
+    log_path = os.path.join(str(log_dir), "service.log")
 
     handlers: list[logging.Handler] = []
     try:

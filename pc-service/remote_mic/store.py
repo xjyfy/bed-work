@@ -1,6 +1,8 @@
 """配置读写与绑定数据：remotes / 应用栏位 / 每栏位发送快捷键。
 
-配置即 `pc-service/config.json`，所有写入都走原子替换（先写临时文件再 os.replace），
+配置默认落在 `%LOCALAPPDATA%\\RemoteMic\\config.json`（打包后程序目录只读），
+开发期首次运行会把仓库里的 `pc-service/config.json` 自动迁移过去。
+所有写入都走原子替换（先写临时文件再 os.replace），
 避免托盘、设置页、服务端三方并发时写出半个文件。
 """
 
@@ -15,7 +17,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+from . import paths
+
+CONFIG_PATH = paths.config_path()
 
 
 # ------------------------------------------------------------------ 读写
