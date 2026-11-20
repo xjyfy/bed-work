@@ -15,6 +15,8 @@ import subprocess
 import winreg
 from typing import Optional
 
+from . import paths
+
 logger = logging.getLogger(__name__)
 
 # 明显是卸载/更新/安装器的关键字，不进应用列表
@@ -344,16 +346,28 @@ def _store_apps() -> list[tuple[str, str]]:
 
 # ------------------------------------------------------------------ 图标
 
-_ICON_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "remote-mic", "icons")
+_ICON_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "remote-mic", "icons")  # 老版本兼容，仅作说明
 
 
 def icon_cache_dir() -> str:
-    os.makedirs(_ICON_DIR, exist_ok=True)
-    return _ICON_DIR
+    # 与 config.json / logs 统一到 %LOCALAPPDATA%\RemoteMic\icons
+    # （老版本放在 %LOCALAPPDATA%\remote-mic\icons，那批缓存不再读取，会自然重建）
+    path = os.path.join(str(paths.data_dir()), "icons")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def _icon_path(exe: str) -> str:
-    digest = hashlib.md5(exe.lower().encode("utf-8")).hexdigest()[:16]
+    # 缓存键里带上 exe 的修改时间：应用升级换了图标后能自动重画，
+    # 不用重启服务，也不用清 %LOCALAPPDATA%\remote-mic\icons。
+    # （UWP 的键按 AUMID，拿不到 mtime，走 _uwp_icon_path）
+    stamp = ""
+    try:
+        if not exe.startswith("uwp:"):
+            stamp = str(int(os.path.getmtime(exe)))
+    except OSError:
+        stamp = ""
+    digest = hashlib.md5(f"{exe.lower()}|{stamp}".encode("utf-8")).hexdigest()[:16]
     # 后缀带 _256：手机端要把图标当桌面图标那样放大显示，32px 会糊；
     # 换名字也顺手把老的低清缓存作废（不会去读旧文件）
     return os.path.join(icon_cache_dir(), f"{digest}_256.png")

@@ -100,6 +100,8 @@ _SM_CXVIRTUALSCREEN = 78
 _SM_CYVIRTUALSCREEN = 79
 
 user32.EnumWindows.argtypes = [_ENUM_WINDOWS_PROC, wintypes.LPARAM]
+user32.EnumChildWindows.argtypes = [wintypes.HWND, _ENUM_WINDOWS_PROC, wintypes.LPARAM]
+user32.EnumChildWindows.restype = wintypes.BOOL
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -195,6 +197,7 @@ class Actioner:
         self._alt_tab_active = False
         self._voice_on = False
         self._tab_index = 0
+        self._foreground_path = ""  # 上一次解析到的前台程序完整路径（UWP 栏位匹配用）
         self._held: set[Key] = set()
 
         self._on_voice_state_change = on_voice_state_change
@@ -315,25 +318,85 @@ class Actioner:
 
     # ------------------------------------------------------------------ 发送快捷键
 
-    def _foreground_exe(self) -> str:
-        """当前前台窗口所属进程的可执行文件名（小写）；取不到返回空串。"""
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return ""
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if not pid.value:
-            return ""
-        hproc = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+    def _process_image(self, pid: int) -> tuple[str, str]:
+        """按 pid 取（小写 exe 文件名, 完整路径）；取不到返回空串。"""
+        if not pid:
+            return "", ""
+        hproc = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
         if not hproc:
-            return ""
+            return "", ""
         try:
             buf = ctypes.create_unicode_buffer(260)
             size = wintypes.DWORD(260)
             if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                return os.path.basename(buf.value).lower()
+                path = buf.value
+                return os.path.basename(path).lower(), path
         finally:
             kernel32.CloseHandle(hproc)
+        return "", ""
+
+    @staticmethod
+    def _pid_of_window(hwnd) -> int:
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value or 0)
+
+    def _uwp_real_exe(self, hwnd) -> tuple[str, str]:
+        """UWP 应用在前台时，顶层窗口属于 ApplicationFrameHost.exe。
+
+        真实应用画在它的子窗口里，遍历子窗口取第一个非宿主进程即可拿到
+        真正的 exe（豆包/微信这类商店版）。这样 send_hotkey 按 exe 查表才不会落空。
+        """
+        found: list[tuple[str, str]] = []
+
+        def _cb(child, _lparam):
+            name, path = self._process_image(self._pid_of_window(child))
+            if name and name != "applicationframehost.exe":
+                found.append((name, path))
+                return False  # 找到即停
+            return True
+
+        callback = _ENUM_WINDOWS_PROC(_cb)
+        try:
+            user32.EnumChildWindows(hwnd, callback, 0)
+        except Exception:  # noqa: BLE001 - 枚举失败就退回宿主名
+            logger.warning("EnumChildWindows failed", exc_info=True)
+        return found[0] if found else ("", "")
+
+    def _foreground_exe(self) -> str:
+        """当前前台窗口所属进程的可执行文件名（小写）；取不到返回空串。
+
+        UWP 应用会透过 ApplicationFrameHost 解析到真实 exe，
+        并把完整路径记到 self._foreground_path 供栏位匹配用。
+        """
+        self._foreground_path = ""
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        name, path = self._process_image(self._pid_of_window(hwnd))
+        if name == "applicationframehost.exe":
+            name, path = self._uwp_real_exe(hwnd)
+        self._foreground_path = path
+        return name
+
+    @staticmethod
+    def _uwp_pfn(path: str) -> str:
+        """从进程路径的包目录名推 PackageFamilyName（也就是 AUMID 的前半段）。
+
+        目录名是 PackageFullName：`Name_Version_Arch_ResourceId_PublisherId`，
+        而 PackageFamilyName = `Name_PublisherId`（AUMID = `<PFN>!AppId`）。
+        例：`Microsoft.WindowsCalculator_11.2210.0.0_x64__8wekyb3d8bbwe`
+            → `Microsoft.WindowsCalculator_8wekyb3d8bbwe`
+        """
+        if not path:
+            return ""
+        parts = path.replace("/", "\\").split("\\")
+        for i, part in enumerate(parts):
+            if part.lower() == "windowsapps" and i + 1 < len(parts):
+                segments = parts[i + 1].split("_")
+                if len(segments) >= 4 and segments[0] and segments[-1]:
+                    return segments[0] + "_" + segments[-1]
+                return ""
         return ""
 
     @staticmethod
@@ -346,16 +409,28 @@ class Actioner:
         return None
 
     def _slot_for_exe(self, exe: str) -> str:
-        """前台程序属于哪个应用栏位（按 exe 名比对 config.apps 里的路径）。"""
-        if not exe:
-            return ""
-        import os
+        """前台程序属于哪个应用栏位。
 
-        for slot, path in (self._config.get("apps") or {}).items():
-            if not path:
-                continue
-            if os.path.basename(str(path)).lower() == exe:
-                return str(slot)
+        两套匹配：普通程序按 exe 文件名；商店应用按 PackageFamilyName
+        （栏位存的是 `uwp:<PFN>!App`，前台进程路径在 `WindowsApps/<PFN>/` 下）。
+        """
+        apps = self._config.get("apps") or {}
+        if exe:
+            for slot, path in apps.items():
+                spec = str(path or "")
+                if not spec or spec.startswith("uwp:"):
+                    continue
+                if os.path.basename(spec).lower() == exe:
+                    return str(slot)
+
+        pfn = self._uwp_pfn(getattr(self, "_foreground_path", ""))
+        if pfn:
+            for slot, path in apps.items():
+                spec = str(path or "")
+                if not spec.startswith("uwp:"):
+                    continue
+                if spec[4:].split("!")[0].lower() == pfn.lower():
+                    return str(slot)
         return ""
 
     def handle_send(self) -> None:
@@ -823,6 +898,16 @@ class Actioner:
     @property
     def voice_on(self) -> bool:
         return self._voice_on
+
+    @property
+    def tab_index(self) -> int:
+        """Ctrl+1..9 循环到第几个（0 = 还没切过）。"""
+        return self._tab_index
+
+    @property
+    def alt_tab_active(self) -> bool:
+        """是否停在 Alt+Tab 切换浮层里（status 用 "switcher" 模式表示）。"""
+        return self._alt_tab_active
 
     # ------------------------------------------------------------------ 滚轮
 

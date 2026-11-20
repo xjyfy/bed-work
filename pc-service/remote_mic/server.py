@@ -149,6 +149,11 @@ class RemoteMicService:
             "active_id": self._active_id or "",
             "clients": clients,
             "voice": self._actioner.voice_on,
+            # 下面三项是 2026-11-20 补的"状态可见性"：手机端能在语音不可用时直接提示
+            # （声卡没装好 / 输出流没打开），也能显示当前是否停在 Alt+Tab 浮层与 Tab 序号。
+            "audio_ready": bool(getattr(self._audio, "ready", False)),
+            "mode": "switcher" if self._actioner.alt_tab_active else "normal",
+            "tab_index": self._actioner.tab_index,
         }
 
     async def _broadcast_status(self) -> None:
