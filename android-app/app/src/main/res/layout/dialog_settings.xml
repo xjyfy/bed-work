@@ -14,6 +14,7 @@
             android:id="@+id/editHost"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:importantForAutofill="no"
             android:inputType="text" />
     </com.google.android.material.textfield.TextInputLayout>
 
@@ -26,18 +27,20 @@
             android:id="@+id/editPort"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:importantForAutofill="no"
             android:inputType="number" />
     </com.google.android.material.textfield.TextInputLayout>
 
     <com.google.android.material.textfield.TextInputLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="绑定 token（扫码后自动填入）">
+        android:hint="绑定 token（电脑端设置页可查）">
 
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/editToken"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:importantForAutofill="no"
             android:inputType="text" />
     </com.google.android.material.textfield.TextInputLayout>
 </LinearLayout>
