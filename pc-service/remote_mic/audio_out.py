@@ -28,6 +28,10 @@ class AudioOut:
         self._lock = threading.RLock()
         self._active = False
         self._stream: Optional[sd.OutputStream] = None
+        # 是否真正打开了虚拟声卡输出流；False 时语音应整体禁用（不得回落到物理输出设备）
+        self._ready = False
+        self._matched_name = ""
+        self._matched_hostapi = ""
 
         # 环形缓冲：约 1 秒容量的 int16 样本
         capacity = self._sample_rate
@@ -38,39 +42,95 @@ class AudioOut:
 
     # ------------------------------------------------------------------ 设备
 
-    def find_output_device(self) -> Optional[int]:
+    @property
+    def ready(self) -> bool:
+        """虚拟声卡是否就绪（供 status 帧 / 托盘显示用）。"""
+        return self._ready
+
+    @property
+    def matched_device(self) -> str:
+        return f"{self._matched_name} [{self._matched_hostapi}]" if self._matched_name else ""
+
+    @staticmethod
+    def _hostapi_name(dev: dict) -> str:
         try:
-            devices = sd.query_devices()
-            for idx, dev in enumerate(devices):
-                if dev["max_output_channels"] > 0 and self._device_keyword.lower() in dev["name"].lower():
-                    logger.info("matched audio device: %s (idx=%s)", dev["name"], idx)
-                    return idx
-            logger.warning("no output device matched keyword '%s'; will use default", self._device_keyword)
-            return None
+            return str(sd.query_hostapis(int(dev["hostapi"]))["name"])
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _output_candidates(self) -> list[tuple[int, dict, str]]:
+        """按关键字列出候选播放端，WASAPI 优先。
+
+        注意：WASAPI 走共享模式的混音格式，**不做重采样**，VB-CABLE 默认 48k 时打不开
+        16k 流（实测 `Invalid sample rate / PaErrorCode -9997`）；MME / DirectSound 会
+        重采样，所以候选必须按顺序逐个试开，不能只取第一个。
+        """
+        try:
+            matching = [
+                (idx, dict(dev), self._hostapi_name(dev))
+                for idx, dev in enumerate(sd.query_devices())
+                if dev["max_output_channels"] > 0
+                and self._device_keyword.lower() in str(dev["name"]).lower()
+            ]
         except Exception as exc:  # noqa: BLE001
             logger.error("query audio devices failed: %s", exc)
-            return None
+            return []
+
+        if not matching:
+            logger.error(
+                "no output device matched keyword '%s'; voice is disabled "
+                "(install VB-CABLE or fix audio_device_keyword)",
+                self._device_keyword,
+            )
+            return []
+
+        def rank(item: tuple[int, dict, str]) -> int:
+            api = item[2].lower()
+            if "wasapi" in api:
+                return 0  # 延迟最低，但可能不支持 16k
+            if "directsound" in api:
+                return 1  # 会重采样，兼容性最好
+            return 2
+
+        return sorted(matching, key=rank)
 
     def start(self) -> None:
         with self._lock:
-            if self._stream is not None:
+            if self._stream is not None or self._ready:
                 return
-            device = self.find_output_device()
+            candidates = self._output_candidates()
+            if not candidates:
+                self._ready = False
+                return
             blocksize = int(self._sample_rate * self._frame_ms / 1000)
-            try:
-                self._stream = sd.OutputStream(
-                    samplerate=self._sample_rate,
-                    blocksize=blocksize,
-                    channels=self._channels,
-                    dtype="int16",
-                    device=device,
-                    callback=self._callback,
+            for idx, dev, api in candidates:
+                try:
+                    stream = sd.OutputStream(
+                        samplerate=self._sample_rate,
+                        blocksize=blocksize,
+                        channels=self._channels,
+                        dtype="int16",
+                        device=idx,
+                        callback=self._callback,
+                    )
+                    stream.start()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("device %s (%s, idx=%s) unusable: %s", dev["name"], api, idx, exc)
+                    continue
+                self._stream = stream
+                self._ready = True
+                self._matched_name = str(dev["name"])
+                self._matched_hostapi = api
+                logger.info(
+                    "audio output started (sr=%s, block=%s) -> %s (%s, idx=%s)",
+                    self._sample_rate, blocksize, dev["name"], api, idx,
                 )
-                self._stream.start()
-                logger.info("audio output started (sr=%s, block=%s)", self._sample_rate, blocksize)
-            except Exception as exc:  # noqa: BLE001
-                self._stream = None
-                logger.error("open audio stream failed: %s", exc)
+                return
+            self._ready = False
+            logger.error(
+                "all %d candidate device(s) refused %s Hz; voice is disabled",
+                len(candidates), self._sample_rate,
+            )
 
     def stop(self) -> None:
         with self._lock:
@@ -81,6 +141,7 @@ class AudioOut:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("close stream failed: %s", exc)
                 self._stream = None
+            self._ready = False
             self._clear()
 
     # ------------------------------------------------------------------ 缓冲
@@ -99,7 +160,8 @@ class AudioOut:
                 self._clear()
 
     def feed(self, pcm: bytes) -> None:
-        if not self._active or not pcm:
+        # 声卡未就绪时直接丢帧：宁可没有声音，也不能把语音从物理扬声器放出来
+        if not self._active or not self._ready or not pcm:
             return
         samples = np.frombuffer(pcm, dtype=np.int16)
         with self._lock:

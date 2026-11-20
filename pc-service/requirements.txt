@@ -4,3 +4,8 @@ pynput>=1.7.6
 numpy>=1.26
 pystray>=0.10.0
 Pillow>=10.0.0
+# 设置页（settings_web.py）。Windows 上会连带安装 pythonnet / clr-loader，
+# WebView2 缺失时会自动回退到 settings_ui.py（tkinter）
+pywebview>=6.0
+# 绑定二维码（store.make_qr_image 延迟导入；缺它设置页生成二维码会 ImportError）
+qrcode>=8.0

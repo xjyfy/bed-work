@@ -27,6 +27,7 @@ from .store import (
     CONFIG_PATH,
     add_remote,
     computer_name,
+    default_config,
     ensure_basics,
     find_remote_by_token,
     load_config,
@@ -37,6 +38,9 @@ from .store import (
 from .tray import Tray
 
 logger = logging.getLogger("remote_mic")
+
+# 远程粘贴文本上限（字符数）。手机端先拦一次，服务端再兜一次。
+CLIP_MAX_CHARS = 100_000
 
 
 class _Client:
@@ -54,7 +58,11 @@ class RemoteMicService:
     def __init__(self, config: dict):
         self._config = ensure_basics(config)
         self._audio = AudioOut(self._config)
-        self._actioner = Actioner(self._config, on_voice_state_change=self._audio.set_active)
+        self._actioner = Actioner(
+            self._config,
+            on_voice_state_change=self._audio.set_active,
+            on_notice=self._notify,
+        )
         self._tray: Optional[Tray] = None
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -276,8 +284,8 @@ class RemoteMicService:
                 self._actioner.handle_launch(str(msg.get("slot", "")))
             elif mtype == "switcher":
                 self._actioner.handle_switcher(msg.get("action", ""))
-            elif mtype == "select":
-                self._actioner.handle_select(msg.get("action", ""))
+            elif mtype == "clip":
+                self._handle_clip(msg)
             elif mtype == "mic":
                 self._audio.set_active(msg.get("action") == "start")
             elif mtype == "switch_active":
@@ -286,6 +294,29 @@ class RemoteMicService:
                 logger.warning("unknown message type: %s", mtype)
         except Exception as exc:  # noqa: BLE001
             logger.error("dispatch %s failed: %s", mtype, exc)
+
+    # ------------------------------------------------------------------ 远程粘贴
+
+    def _handle_clip(self, msg: dict) -> None:
+        """手机剪贴板 → 电脑剪贴板。
+
+        手机端已经做过一次类型/长度校验，这里再校验一遍（旧版 App、手改包、
+        其他客户端都可能绕过），失败只在本机提示，不回给手机。
+        """
+        text = msg.get("text")
+        if not isinstance(text, str) or not text:
+            logger.warning("clip rejected: empty or non-string payload")
+            return
+        if len(text) > CLIP_MAX_CHARS:
+            logger.warning("clip rejected: %d chars over limit %d", len(text), CLIP_MAX_CHARS)
+            self._notify("远程粘贴失败", f"文本超长：{len(text)} 字符（上限 {CLIP_MAX_CHARS}）")
+            return
+        if not self._actioner.handle_clip(text):
+            self._notify("远程粘贴失败", "写入电脑剪贴板失败，剪贴板可能被其他程序占用")
+
+    def _notify(self, title: str, message: str) -> None:
+        if self._tray is not None:
+            self._tray.notify(message, title)
 
     # ------------------------------------------------------------------ 连接
 
@@ -457,9 +488,34 @@ def _notify_already_running() -> None:
         pass
 
 
+def _load_or_init_config() -> dict:
+    """首次运行时自动生成 config.json；已存在则原样读取，**绝不覆盖**。
+
+    之前缺 config.json 会直接抛 FileNotFoundError，双击启动只闪一下就退出，
+    用户完全看不到原因，因此改为自愈。
+    """
+    if CONFIG_PATH.exists():
+        return load_config()
+
+    example = CONFIG_PATH.with_name("config.example.json")
+    try:
+        if example.exists():
+            import shutil
+
+            shutil.copyfile(example, CONFIG_PATH)
+            logger.warning("config.json missing; created from config.example.json")
+        else:
+            save_config(default_config(), CONFIG_PATH)
+            logger.warning("config.json missing; created with defaults")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("create config.json failed: %s", exc)
+        raise
+    return load_config()
+
+
 def main() -> None:
     _setup_logging()
-    config = load_config()
+    config = _load_or_init_config()
     ensure_basics(config)
     if _port_in_use(int(config.get("port", 8765))):
         logger.warning("port %s already in use, another instance is running", config.get("port", 8765))

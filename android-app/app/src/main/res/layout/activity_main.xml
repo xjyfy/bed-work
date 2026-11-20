@@ -103,7 +103,7 @@
                 android:text="音量+" />
         </LinearLayout>
 
-        <!-- ========== 功能区：复制 / 粘贴 / 删除 ========== -->
+        <!-- ========== 功能区：远程粘贴 / 删除 ========== -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -111,21 +111,12 @@
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnCopy"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_weight="1"
-                android:text="复制" />
-
-            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnPaste"
                 style="@style/Widget.RemoteMic.Key"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="粘贴" />
+                android:text="远程粘贴" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnDelete"

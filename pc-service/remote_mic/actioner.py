@@ -4,7 +4,7 @@
 - 方向键统一映射上下左右；确认统一映射回车；取消统一映射 Esc。
 - 切换浮层不再有独立的方向 / 确认 / 取消：进入后用同一组方向键遍历，
   下一次确认释放 Alt 落地，取消则先 Esc 关浮层再释放 Alt。
-- 文本选择模式（select_mode）：方向键变为 Shift+方向，确认键复制。
+- 文本选择模式已下线：手机端不再有「复制」，改为「远程粘贴」（手机剪贴板 → 电脑剪贴板）。
 - 视频播放暂停专走空格；多媒体播放暂停走媒体键，两者分开避免互相抵消。
 - 新对话 Ctrl+N；发送按前台应用在 send_hotkey 里选快捷键。
 
@@ -24,6 +24,8 @@ from typing import Callable, Dict, Optional
 
 from pynput.keyboard import Controller as KeyController, Key, KeyCode
 from pynput.mouse import Controller as MouseController
+
+from . import clipboard
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,78 @@ class _WindowPlacement(ctypes.Structure):
         ("rcNormalPosition", wintypes.RECT),
     ]
 
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+_ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+# ---- Win32 声明（缺 argtypes/restype 时 64 位句柄会被截断成 32 位 int）----
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_GWL_STYLE = -16
+_GW_OWNER = 4
+_WS_CAPTION = 0x00C00000
+_WS_THICKFRAME = 0x00040000
+_MIN_WIN_W = 120   # 真实窗口最小宽（像素），用于排除消息窗 / 辅助窗
+_MIN_WIN_H = 80
+_SW_SHOW = 5
+_SW_RESTORE = 9
+
+user32.EnumWindows.argtypes = [_ENUM_WINDOWS_PROC, wintypes.LPARAM]
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetWindow.restype = wintypes.HWND
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.restype = wintypes.BOOL
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(_WindowPlacement)]
+user32.GetWindowPlacement.restype = wintypes.BOOL
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.IsWindowVisible.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wintypes.BOOL
+user32.BringWindowToTop.argtypes = [wintypes.HWND]
+user32.BringWindowToTop.restype = wintypes.BOOL
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.LockSetForegroundWindow.argtypes = [wintypes.UINT]
+user32.LockSetForegroundWindow.restype = wintypes.BOOL
+user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.AttachThreadInput.restype = wintypes.BOOL
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+]
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+kernel32.Process32FirstW.restype = wintypes.BOOL
+kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+kernel32.Process32NextW.restype = wintypes.BOOL
+
 # 普通方向 / 功能键映射
 _KEY_MAP = {
     "up": Key.up,
@@ -101,19 +175,34 @@ SCROLL_STEP = 3
 
 
 class Actioner:
-    def __init__(self, config: dict, on_voice_state_change: Optional[Callable[[bool], None]] = None):
+    def __init__(
+        self,
+        config: dict,
+        on_voice_state_change: Optional[Callable[[bool], None]] = None,
+        on_notice: Optional[Callable[[str, str], None]] = None,
+    ):
         self._config = config
+        self._on_notice = on_notice
         self._keyboard = KeyController()
         self._mouse = MouseController()
         self._lock = threading.RLock()
 
-        self._select_mode = False
         self._alt_tab_active = False
         self._voice_on = False
         self._tab_index = 0
         self._held: set[Key] = set()
 
         self._on_voice_state_change = on_voice_state_change
+
+    def _notice(self, title: str, message: str) -> None:
+        """动作失败给电脑端一个可读反馈（托盘气泡），不能静默无响应。"""
+        if self._on_notice is None:
+            logger.info("notice (no sink): %s | %s", title, message)
+            return
+        try:
+            self._on_notice(title, message)
+        except Exception:  # noqa: BLE001
+            logger.exception("notice failed: %s", title)
 
     # ------------------------------------------------------------------ 基础
 
@@ -147,7 +236,6 @@ class Actioner:
             for key in list(self._held):
                 self._release(key)
             self._alt_tab_active = False
-            self._select_mode = False
             self._tab_index = 0
             if self._voice_on:
                 self._set_voice(False)
@@ -174,16 +262,7 @@ class Actioner:
                     self._alt_tab_active = False
                     logger.info("switcher confirmed by unified OK key")
                     return
-                if self._select_mode:
-                    # 先确保修饰键抬起，再 Ctrl+C，给剪贴板一点落盘时间
-                    logger.info("select mode: Ctrl+C copy")
-                    self._combo(["ctrl"], KeyCode.from_char("c"))
-                    time.sleep(0.06)
-                    self._select_mode = False
-                    # 复制后移动光标取消文字选中高亮（编辑框 / 可编辑控件生效）
-                    self._tap(Key.right)
-                else:
-                    self._tap(_KEY_MAP["ok"])
+                self._tap(_KEY_MAP["ok"])
                 return
 
             if code == "esc":
@@ -194,16 +273,7 @@ class Actioner:
                     self._alt_tab_active = False
                     logger.info("switcher cancelled by unified ESC key")
                     return
-                if self._select_mode:
-                    self._select_mode = False
-                    self._tap(Key.right)
-                    logger.info("select mode exited by ESC")
-                    return
                 self._tap(Key.esc)
-                return
-
-            if code == "paste":
-                self._combo(["ctrl"], KeyCode.from_char("v"))
                 return
 
             if code == "new_chat":
@@ -218,12 +288,8 @@ class Actioner:
                 self.cycle_tab()
                 return
             if code in ("up", "down", "left", "right"):
-                if self._select_mode:
-                    # 选择模式：Shift + 方向扩展选区
-                    self._combo(["shift"], _KEY_MAP[code])
-                else:
-                    # 切换浮层里同样用这四个方向键遍历窗口（Alt 保持按下）
-                    self._tap(_KEY_MAP[code])
+                # 切换浮层里用这四个方向键遍历窗口（Alt 保持按下）
+                self._tap(_KEY_MAP[code])
                 return
 
             if code in _KEY_MAP:
@@ -331,61 +397,131 @@ class Actioner:
 
     # ------------------------------------------------------------------ 应用启动
 
-    def _focus_window_by_exe(self, exe_name: str) -> bool:
-        """查找同名可执行文件的主可见窗口并前置；找到返回 True。
+    def _find_windows_by_exe(self, exe_name: str) -> list[dict]:
+        """枚举属于该 exe 的「真实窗口」，**包含已最小化到托盘的隐藏窗口**。
 
-        过滤离屏无标题的辅助窗口（部分应用会挂 -9999 位置的隐藏子窗），
-        前置时保留窗口原本的最大化 / 普通状态，不强制还原缩小。
+        这是「切换应用却新起一个实例」的根因修复点：原实现只认 `IsWindowVisible`，
+        而微信 / 豆包等关到托盘时主窗口是 hidden 状态，进程明明活着一窗口却看不见，
+        于是被误判成"没在运行"而 `startfile` 多开了一个新实例。
+
+        真实窗口判定：无 owner（顶层窗口）、带标题栏或可缩放边框（排除
+        Qt/Chrome 的 *MessageWindow*、IME、全 0 样式的消息窗）、尺寸够大。
         """
-        candidates: list[dict] = []
+        target = exe_name.lower()
+        found: list[dict] = []
 
-        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        @_ENUM_WINDOWS_PROC
         def _enum_cb(hwnd: wintypes.HWND, _lparam: wintypes.LPARAM) -> bool:
-            if not user32.IsWindowVisible(hwnd):
-                return True
             pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value == 0:
+            if not pid.value:
                 return True
-            hproc = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+            hproc = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
             if not hproc:
                 return True
             try:
                 buf = ctypes.create_unicode_buffer(260)
                 size = wintypes.DWORD(260)
-                if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
-                    if os.path.basename(buf.value).lower() == exe_name.lower():
-                        title_buf = ctypes.create_unicode_buffer(128)
-                        user32.GetWindowTextW(hwnd, title_buf, 128)
-                        title = title_buf.value
-                        placement = _WindowPlacement()
-                        placement.length = ctypes.sizeof(_WindowPlacement)
-                        user32.GetWindowPlacement(hwnd, ctypes.byref(placement))
-                        on_screen = placement.rcNormalPosition.left > -9000
-                        candidates.append({
-                            "hwnd": int(hwnd),
-                            "title": title,
-                            "show_cmd": placement.showCmd,
-                            "has_title": bool(title),
-                            "on_screen": on_screen,
-                            "minimized": placement.showCmd == 2,
-                        })
+                if not kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                    return True
+                if os.path.basename(buf.value).lower() != target:
+                    return True
             finally:
                 kernel32.CloseHandle(hproc)
+
+            style = int(user32.GetWindowLongW(hwnd, _GWL_STYLE) or 0)
+            if not style & (_WS_CAPTION | _WS_THICKFRAME):
+                return True          # 消息窗 / IME / 无边框辅助窗
+            if user32.GetWindow(hwnd, _GW_OWNER):
+                return True          # 有 owner = 子级弹层，不是主窗口
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return True
+            placement = _WindowPlacement()
+            placement.length = ctypes.sizeof(_WindowPlacement)
+            user32.GetWindowPlacement(hwnd, ctypes.byref(placement))
+            # 尺寸要用「还原后尺寸」判定：最小化 / 停到屏幕外的窗口
+            # （微信就是 showCmd=2、当前 rect 停在 -21333 且只有 158x26）
+            # 用当前 rect 会被尺寸过滤误杀，导致"明明开着却说没运行"。
+            cur_w = rect.right - rect.left
+            cur_h = rect.bottom - rect.top
+            normal = placement.rcNormalPosition
+            nor_w = normal.right - normal.left
+            nor_h = normal.bottom - normal.top
+            if max(cur_w, nor_w) < _MIN_WIN_W or max(cur_h, nor_h) < _MIN_WIN_H:
+                return True
+
+            title_buf = ctypes.create_unicode_buffer(200)
+            user32.GetWindowTextW(hwnd, title_buf, 200)
+            cls_buf = ctypes.create_unicode_buffer(200)
+            user32.GetClassNameW(hwnd, cls_buf, 200)
+            cls = cls_buf.value or ""
+            # 排除 *MessageWindow / 托盘图标消息窗 这类"看起来有标题但不是主窗口"的壳
+            if "messagewindow" in cls.lower() or "ime" in cls.lower():
+                return True
+            placement = _WindowPlacement()
+            placement.length = ctypes.sizeof(_WindowPlacement)
+            user32.GetWindowPlacement(hwnd, ctypes.byref(placement))
+            found.append({
+                "hwnd": int(hwnd),
+                "pid": int(pid.value),
+                "title": title_buf.value,
+                "visible": bool(user32.IsWindowVisible(hwnd)),
+                "has_title": bool(title_buf.value),
+                "show_cmd": placement.showCmd,
+                "minimized": placement.showCmd == 2,
+                # 停在屏幕外（如 -21333）也算隐藏：SetForegroundWindow 对它无效，得先挪回来
+                "offscreen": rect.right <= 0 or rect.bottom <= 0 or normal.left < -9000,
+                "area": max(cur_w * cur_h, nor_w * nor_h),
+            })
             return True
 
         user32.EnumWindows(_enum_cb, 0)
-        # 排除离屏无标题的辅助窗口；有标题、在屏、非最小化的主窗口优先
-        main = [c for c in candidates if c["has_title"] or c["on_screen"]]
-        if not main:
-            return False
-        main.sort(key=lambda c: (c["has_title"], c["on_screen"], not c["minimized"]), reverse=True)
-        win = main[0]
+        # 可见 → 有标题 → 非最小化 → 面积大，依次优先
+        found.sort(
+            key=lambda c: (c["visible"], c["has_title"], not c["minimized"], c["area"]),
+            reverse=True,
+        )
+        return found
 
+    def _process_count_by_exe(self, exe_name: str) -> int:
+        """统计同名可执行文件的进程数（不看窗口，用于判断"是否已在运行"）。"""
+        _TH32CS_SNAPPROCESS = 0x2
+        target = exe_name.lower()
+        snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if not snapshot or int(snapshot) == -1:
+            return 0
+        count = 0
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                if os.path.basename(entry.szExeFile).lower() == target:
+                    count += 1
+                ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        except Exception:  # noqa: BLE001
+            logger.exception("process snapshot failed")
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return count
+
+    def _focus_window_by_exe(self, exe_name: str) -> bool:
+        """查找同名进程的主窗口并前置；找到返回 True（含托盘隐藏窗口）。"""
+        wins = self._find_windows_by_exe(exe_name)
+        if not wins:
+            return False
+        win = wins[0]
+        if len(wins) > 1 or not win["visible"]:
+            logger.info(
+                "windows of %s: %d (hidden=%d) -> use hwnd=%s title=%r",
+                exe_name, len(wins), sum(1 for w in wins if not w["visible"]),
+                win["hwnd"], win["title"],
+            )
         hwnd = win["hwnd"]
-        # 最大化保持最大化；其余（普通 / 最小化）还原，避免把全屏窗口缩小
-        show_cmd = 3 if win["show_cmd"] == 3 else 9  # SW_MAXIMIZE / SW_RESTORE
-        return self._activate_window(hwnd, show_cmd)
+        # 最大化保持最大化；隐藏（托盘）/ 停到屏幕外 / 普通 / 最小化一律 restore 拉回前台
+        show_cmd = 3 if win["show_cmd"] == 3 else _SW_RESTORE
+        return self._activate_window(hwnd, show_cmd, hidden=(not win["visible"]) or win["offscreen"])
 
     def _is_foreground(self, hwnd: int) -> bool:
         fg = user32.GetForegroundWindow()
@@ -399,12 +535,12 @@ class Actioner:
             time.sleep(0.1)
         return self._is_foreground(hwnd)
 
-    def _activate_window(self, hwnd: int, show_cmd: int) -> bool:
+    def _activate_window(self, hwnd: int, show_cmd: int, hidden: bool = False) -> bool:
         """前置目标窗口；成功判据是前台读回属于目标，而非 SetForegroundWindow 的 BOOL。
 
-        流程：解锁前台锁 → AttachThreadInput 附加前台线程（失败不阻断）→
-        ShowWindow/BringToTop/SetForegroundWindow → 读回复核；仍失败则最小化当前
-        前台窗口，再还原并置前目标。不注入 Alt 等修饰键，避免卡在按下态导致全局键盘异常。
+        流程：隐藏窗口先 ShowWindow(SW_SHOW) 拉回来 → 解锁前台锁 →
+        AttachThreadInput 附加前台线程（失败不阻断）→ ShowWindow/BringToTop/
+        SetForegroundWindow → 读回复核；仍失败则最小化当前前台窗口，再还原并置前目标。
         """
         LSF_UNLOCKLOCK = 1
         SW_MINIMIZE = 6
@@ -412,6 +548,11 @@ class Actioner:
             user32.LockSetForegroundWindow(LSF_UNLOCKLOCK)
         except Exception:  # noqa: BLE001
             pass
+
+        if hidden:
+            # 托盘里的窗口必须先显形，否则 SetForegroundWindow 对隐藏窗口无效
+            user32.ShowWindow(hwnd, _SW_SHOW)
+            time.sleep(0.05)
 
         fg = user32.GetForegroundWindow()
         fg_tid = user32.GetWindowThreadProcessId(fg, None)
@@ -435,15 +576,25 @@ class Actioner:
         if cur and cur != hwnd:
             user32.ShowWindow(cur, SW_MINIMIZE)
             time.sleep(0.1)
+        user32.ShowWindow(hwnd, _SW_SHOW)
         user32.ShowWindow(hwnd, show_cmd)
         user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
         return self._readback(hwnd)
 
     def _extract_exe_name(self, path: str) -> str:
-        """从纯路径或带引号/参数的命令行里提取可执行文件名（小写 basename）。"""
+        """从纯路径或带引号/参数的命令行里提取可执行文件名（小写 basename）。
+
+        注意 exe 名本身可能带空格（`DeepSeek Harness.exe`），不能按空格切词，
+        否则会截成 `Harness.exe` 而永远匹配不到进程 → 每次点击都新开一个实例。
+        """
         import re
-        m = re.search(r'"([^"]+\.exe)"', path, re.IGNORECASE) or re.search(r"(\S+\.exe)", path, re.IGNORECASE)
+        text = path.strip()
+        m = re.search(r'"([^"]+\.exe)"', text, re.IGNORECASE)
+        if m:
+            return os.path.basename(m.group(1)).lower()
+        # 未加引号：取到第一个 ".exe" 且其后是空白或字符串结尾为止
+        m = re.search(r"^(.*?\.exe)(?=\s|$)", text, re.IGNORECASE)
         if m:
             return os.path.basename(m.group(1)).lower()
         return ""
@@ -463,11 +614,40 @@ class Actioner:
                 self._tab_index = 0
                 return
             exe_name = self._extract_exe_name(path)
-            # 已在运行则前置已有窗口，避免重复新开一个实例 / 窗口
-            if exe_name and self._focus_window_by_exe(exe_name):
-                logger.info("focused existing slot %s: %s", slot, exe_name)
-                self._tab_index = 0
-                return
+            if exe_name:
+                # 1) 已有窗口（含关到托盘的隐藏窗口）→ 只切换，绝不新起进程
+                wins = self._find_windows_by_exe(exe_name)
+                if wins:
+                    win = wins[0]
+                    show_cmd = 3 if win["show_cmd"] == 3 else _SW_RESTORE
+                    hidden = (not win["visible"]) or win["offscreen"]
+                    if self._activate_window(win["hwnd"], show_cmd, hidden=hidden):
+                        logger.info(
+                            "focused existing slot %s: %s (hwnd=%s hidden=%s, windows=%d)",
+                            slot, exe_name, win["hwnd"], hidden, len(wins),
+                        )
+                    else:
+                        # 关键：窗口找到了但置前失败，绝不能当成"没在运行"去 startfile，
+                        # 否则就是用户看到的"切换应用却多开一个新实例"。
+                        logger.warning(
+                            "slot %s: %s has %d window(s) but activate failed; keep existing instance",
+                            slot, exe_name, len(wins),
+                        )
+                        self._notice("切换应用失败", f"{exe_name} 已有窗口但无法置前，未重复启动")
+                    self._tab_index = 0
+                    return
+                # 2) 进程活着却没有任何真实窗口（例如托盘里只剩余消息窗）→ 同样不启动
+                running = self._process_count_by_exe(exe_name)
+                if running:
+                    logger.warning(
+                        "slot %s: %s running (%d process) without a window; skip launch to avoid duplicate",
+                        slot, exe_name, running,
+                    )
+                    self._notice(
+                        "应用在后台",
+                        f"{exe_name} 正在运行但没有窗口，已跳过启动（避免多开新实例）",
+                    )
+                    return
             if os.path.exists(path):
                 os.startfile(path)  # type: ignore[attr-defined]
             else:
@@ -508,18 +688,34 @@ class Actioner:
             else:
                 logger.warning("unknown switcher action: %s", action)
 
-    # ------------------------------------------------------------------ 选区模式
+    # ------------------------------------------------------------------ 远程粘贴
 
-    def handle_select(self, action: str) -> None:
+    def handle_clip(self, text: str) -> bool:
+        """手机剪贴板 → 电脑剪贴板。
+
+        写入成功后：前台有文本焦点（有光标）就补一个 Ctrl+V，否则只写剪贴板、
+        不发按键，避免把 Ctrl+V 打到非输入控件上。
+        """
         with self._lock:
-            if action == "enter":
-                self._select_mode = True
-                logger.info("select mode entered")
-            elif action == "exit":
-                self._select_mode = False
-                # 退出选区：轻触方向键取消文字选中高亮（光标移到选区一端）
-                self._tap(Key.right)
-                logger.info("select mode exited")
+            ok, reason = clipboard.write_text(text)
+            if not ok:
+                logger.error("remote clip failed: %s", reason)
+                return False
+            focus = clipboard.foreground_focus()
+            policy = str(self._config.get("clip_policy", "auto"))
+            do_paste, why = clipboard.should_paste(focus, policy)
+            if do_paste:
+                self._combo(["ctrl"], KeyCode.from_char("v"))
+                logger.info(
+                    "remote clip: %d chars written, pasted [%s] (top=%s focus=%s caret=%s)",
+                    len(text), why, focus["cls"] or "-", focus["focus_cls"] or "-", focus["caret"],
+                )
+            else:
+                logger.info(
+                    "remote clip: %d chars written, clipboard only [%s] (top=%s focus=%s)",
+                    len(text), why, focus["cls"] or "-", focus["focus_cls"] or "-",
+                )
+            return True
 
     # ------------------------------------------------------------------ 语音状态机
 

@@ -46,8 +46,7 @@ class Tray:
             self._icon.icon = _make_icon_image(green)
             self._refresh_menu()
 
-    def set_remotes(self, remotes: list[tuple[str, str, bool]]) -> None:
-        # 同一 remote_id 只保留一条（防御服务端重复连接残留）
+    def set_remotes(self, remotes: list[tuple[str, str, bool]]) -> None:        # 同一 remote_id 只保留一条（防御服务端重复连接残留）
         seen: dict[str, tuple[str, str, bool]] = {}
         for rid, name, active in remotes:
             if rid in seen:
@@ -56,6 +55,16 @@ class Tray:
                 seen[rid] = (rid, name, active)
         self._remotes = list(seen.values())
         self._refresh_menu()
+
+    def notify(self, message: str, title: str = "手机遥控麦") -> None:
+        """托盘气泡提示（远程粘贴写剪贴板失败时用）。"""
+        if self._icon is None:
+            logger.warning("tray not ready, drop notification: %s", message)
+            return
+        try:
+            self._icon.notify(message, title)
+        except Exception:  # noqa: BLE001 - 通知失败不能拖垮服务线程
+            logger.exception("tray notify failed")
 
     def _refresh_menu(self) -> None:
         if self._icon is not None:

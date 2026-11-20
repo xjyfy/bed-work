@@ -2,6 +2,7 @@ package com.willen.remotemic
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -44,7 +45,6 @@ class MainActivity : AppCompatActivity() {
     private var active = false
     private var voiceOn = false
     private var openMode = false
-    private var selectMode = false
 
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var pendingVoiceStop: Runnable? = null
@@ -171,7 +171,6 @@ class MainActivity : AppCompatActivity() {
             connected = false
             active = false
             resetVoiceState()
-            resetSelectMode()
             renderHeader()
         }
 
@@ -353,6 +352,45 @@ class MainActivity : AppCompatActivity() {
         send("hello", "device" to android.os.Build.MODEL, "ts" to System.currentTimeMillis())
     }
 
+    // ------------------------------------------------------------------ 远程粘贴
+
+    /**
+     * 读手机剪贴板并发到电脑，由电脑写入剪贴板并（有输入焦点时）执行 Ctrl+V。
+     *
+     * 本地先做类型与长度校验，不合格直接提示，不把脏数据推给电脑端；
+     * 电脑端写入失败只在电脑端弹托盘提示，手机端不再二次报错。
+     */
+    private fun sendClipboard() {
+        if (!connected) {
+            toast("未连接电脑")
+            return
+        }
+        val cm = getSystemService(ClipboardManager::class.java)
+        if (cm == null || !cm.hasPrimaryClip()) {
+            toast("剪贴板为空")
+            return
+        }
+        val clip = cm.primaryClip
+        if (clip == null || clip.itemCount <= 0) {
+            toast("剪贴板为空")
+            return
+        }
+        val text = clip.getItemAt(0).text?.toString()
+        if (text.isNullOrEmpty()) {
+            toast("暂不支持该类型内容（仅支持文本）")
+            return
+        }
+        if (text.length > CLIP_MAX_CHARS) {
+            toast("文本超长：${text.length} 字符，上限 $CLIP_MAX_CHARS")
+            return
+        }
+        send("clip", "text" to text)
+    }
+
+    private fun toast(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
     // ------------------------------------------------------------------ 语音
 
     private fun startVoice() {
@@ -393,10 +431,7 @@ class MainActivity : AppCompatActivity() {
         updateVoiceButton()
     }
 
-    private fun resetSelectMode() {
-        selectMode = false
-        binding.btnCopy.text = "复制"
-    }
+    // ------------------------------------------------------------------ 远程粘贴
 
     // ------------------------------------------------------------------ 按钮
 
@@ -408,10 +443,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnDown.press { send("key", "code" to "down", "action" to "down") }
         binding.btnLeft.press { send("key", "code" to "left", "action" to "down") }
         binding.btnRight.press { send("key", "code" to "right", "action" to "down") }
-        binding.btnOk.click {
-            send("key", "code" to "ok", "action" to "down")
-            if (selectMode) resetSelectMode()
-        }
+        binding.btnOk.click { send("key", "code" to "ok", "action" to "down") }
         binding.btnCancel.click { send("key", "code" to "esc", "action" to "down") }
 
         // 语音：按住临时说话；快速双击常开；常开态单击结束并退出常开
@@ -466,17 +498,7 @@ class MainActivity : AppCompatActivity() {
         binding.appBtn3.click { send("launch", "slot" to "3") }
         binding.appBtn4.click { send("launch", "slot" to "4") }
 
-        binding.btnCopy.click {
-            selectMode = !selectMode
-            if (selectMode) {
-                send("select", "action" to "enter")
-                binding.btnCopy.text = "退出选区"
-            } else {
-                send("select", "action" to "exit")
-                binding.btnCopy.text = "复制"
-            }
-        }
-        binding.btnPaste.click { send("key", "code" to "paste", "action" to "down") }
+        binding.btnPaste.click { sendClipboard() }
         binding.btnDelete.click { send("key", "code" to "delete", "action" to "down") }
 
         binding.btnSwitcher.click { send("switcher", "action" to "enter") }
@@ -504,5 +526,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val REQ_PERM = 100
+
+        /** 与电脑端 server.py 的 CLIP_MAX_CHARS 保持一致。 */
+        private const val CLIP_MAX_CHARS = 100_000
     }
 }
