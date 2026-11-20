@@ -498,12 +498,8 @@ class MainActivity : AppCompatActivity() {
 
             val actions = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
             actions.addView(Button(ctx).apply {
-                text = "扫码绑定新电脑"
+                text = "扫码绑定设备"
                 setOnClickListener { startScan() }
-            })
-            actions.addView(Button(ctx).apply {
-                text = "手动输入 IP / token"
-                setOnClickListener { showManualAdd() }
             })
             list.addView(actions)
         }
@@ -524,66 +520,6 @@ class MainActivity : AppCompatActivity() {
         scanLauncher.launch(
             Intent(this, com.willen.remotemic.scan.QrScanActivity::class.java)
         )
-    }
-
-    private fun showManualAdd() {
-        val view = layoutInflater.inflate(R.layout.dialog_settings, null)
-        val hostEdit = view.findViewById<EditText>(R.id.editHost)
-        val portEdit = view.findViewById<EditText>(R.id.editPort)
-        val tokenEdit = view.findViewById<EditText>(R.id.editToken)
-        // 这里是「添加一台新电脑」：输入框一律留空，不能把当前正在控制的那台预填进来，
-        // 否则用户改一下地址，实际是在改自己已经连着的设备。
-        hostEdit.setText("")
-        hostEdit.hint = "电脑 IP，如 192.168.2.100"
-        portEdit.setText("8765")
-        tokenEdit.setText("")
-        AlertDialog.Builder(this)
-            .setTitle("添加新电脑（手动）")
-            .setView(view)
-            .setPositiveButton("添加") { _, _ ->
-                val host = hostEdit.text.toString().trim()
-                val port = portEdit.text.toString().trim().toIntOrNull() ?: 8765
-                val token = tokenEdit.text.toString().trim()
-                if (host.isBlank() || token.isBlank()) {
-                    Toast.makeText(this, "IP 和 token 都要填", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                val endpoint = "$host:$port"
-                // token 是电脑的固定身份：同 token 只可能是同一台电脑换了地址；
-                // 同地址不同 token 则是重复添加，直接拦掉，避免列表里两条一样的地址。
-                val sameToken = devices.firstOrNull { it.token == token }
-                val sameAddr = devices.firstOrNull { it.token != token && it.endpoint == endpoint }
-                when {
-                    sameAddr != null -> {
-                        Toast.makeText(this, "这个地址已经添加过了：${sameAddr.name}", Toast.LENGTH_SHORT).show()
-                    }
-                    sameToken != null -> {
-                        // 同一台电脑换了 IP：就地更新地址，保留原来的名字，不算新增
-                        devices.remove(sameToken)
-                        val updated = Device(sameToken.name, host, port, token)
-                        devices.add(updated)
-                        saveDevices()
-                        Toast.makeText(this, "已更新 ${sameToken.name} 的地址为 $endpoint", Toast.LENGTH_SHORT).show()
-                        if (current?.token == token) connectTo(updated)
-                    }
-                    else -> {
-                        val device = Device(name = host, host = host, port = port, token = token)
-                        devices.add(device)
-                        saveDevices()
-                        if (current == null) {
-                            Toast.makeText(this, "已添加 ${host}，正在连接", Toast.LENGTH_SHORT).show()
-                            connectTo(device)
-                        } else {
-                            // 已经在控制别的电脑，不打断当前连接，切过去由列表里点那一行完成
-                            Toast.makeText(this, "已添加 ${host}，点列表里那一行即可切换", Toast.LENGTH_LONG).show()
-                        }
-                        renderHeader()
-                    }
-                }
-                deviceListRefresh?.invoke()
-            }
-            .setNegativeButton("取消", null)
-            .show()
     }
 
     // ------------------------------------------------------------------ 发送
