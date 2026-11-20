@@ -232,12 +232,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderHeader() {
         val device = current
-        binding.tvDevice.text = when {
-            device == null -> "未绑定设备 · 点击绑定"
-            connected && active -> "${device.name} · 已连接"
-            connected -> "${device.name} · 待命（控制权在其他遥控器）"
-            else -> "${device.name} · 未连接"
-        }
+        // 在线状态由左侧圆点 + 状态文字表达，设备名后面不再缀「已连接」
+        binding.tvDevice.text = device?.name ?: "未绑定设备 · 点击绑定"
         binding.statusText.text = when {
             connected && active -> "控制中"
             connected -> "待命"
@@ -252,7 +248,51 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** 设备绑定页：列出已绑定电脑、扫码新增、删除、切换。 */
+    private fun isOnline(device: Device): Boolean =
+        connected && device.token == current?.token
+
+    private fun dotText(online: Boolean): String = if (online) "●" else "○"
+
+    private fun dotColor(online: Boolean): Int =
+        if (online) 0xFF4CAF50.toInt() else 0xFF9E9E9E.toInt()
+
+    /** 点顶部设备名：直接下拉已绑定设备列表，可当场切换被控设备。 */
+    private fun showDeviceMenu() {
+        if (devices.isEmpty()) {
+            showBindingDialog()
+            return
+        }
+        if (devices.size == 1) {
+            val only = devices[0]
+            toast("当前只有一台设备：${only.name}（${if (isOnline(only)) "在线" else "未连接"}）")
+            return
+        }
+        val popup = android.widget.PopupMenu(this, binding.tvDevice)
+        devices.forEachIndexed { index, device ->
+            val online = isOnline(device)
+            val label = "${dotText(online)}  ${device.name}"
+            val item = android.text.SpannableString(label)
+            item.setSpan(
+                android.text.style.ForegroundColorSpan(dotColor(online)),
+                0, 1,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            popup.menu.add(0, index, index, item)
+        }
+        popup.setOnMenuItemClickListener { item ->
+            val device = devices[item.itemId]
+            if (device.token == current?.token && connected) {
+                toast("已经在控制 ${device.name}")
+            } else {
+                connectTo(device)
+                toast("正在切换到 ${device.name}")
+            }
+            true
+        }
+        popup.show()
+    }
+
+    /** 设备管理页：列出已绑定电脑（圆点表示在线）、扫码新增、删除、切换。 */
     private fun showBindingDialog() {
         val ctx = this
         val scroll = ScrollView(ctx)
@@ -268,17 +308,35 @@ class MainActivity : AppCompatActivity() {
                 list.addView(TextView(ctx).apply { text = "还没有绑定任何电脑，点下方「扫码绑定」" })
             }
             devices.forEach { device ->
+                val online = isOnline(device)
                 val row = LinearLayout(ctx).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    setPadding(0, 6, 0, 6)
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, 8, 0, 8)
                 }
-                val mark = if (device.token == current?.token) "● " else ""
-                val pick = Button(ctx).apply {
-                    text = "$mark${device.name}\n${device.endpoint}"
-                    isAllCaps = false
-                    setOnClickListener {
+                val dot = TextView(ctx).apply {
+                    text = dotText(online)
+                    setTextColor(dotColor(online))
+                    textSize = 18f
+                    setPadding(0, 0, 12, 0)
+                }
+                val info = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+                info.addView(TextView(ctx).apply {
+                    text = if (online) "${device.name}（在线）" else "${device.name}（未连接）"
+                    textSize = 16f
+                })
+                info.addView(TextView(ctx).apply {
+                    text = device.endpoint
+                    textSize = 12f
+                    setTextColor(0xFF888888.toInt())
+                })
+                info.setOnClickListener {
+                    if (online) {
+                        Toast.makeText(ctx, "已经在控制 ${device.name}", Toast.LENGTH_SHORT).show()
+                    } else {
                         connectTo(device)
-                        Toast.makeText(ctx, "已切换到 ${device.name}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, "正在切换到 ${device.name}", Toast.LENGTH_SHORT).show()
+                        rebuild()
                     }
                 }
                 val del = Button(ctx).apply {
@@ -296,7 +354,8 @@ class MainActivity : AppCompatActivity() {
                         rebuild()
                     }
                 }
-                row.addView(pick, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(dot, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                row.addView(info, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
                 row.addView(del, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
                 list.addView(row)
             }
@@ -315,7 +374,7 @@ class MainActivity : AppCompatActivity() {
         rebuild()
 
         AlertDialog.Builder(this)
-            .setTitle("设备绑定")
+            .setTitle("设备管理")
             .setView(scroll)
             .setNegativeButton("关闭", null)
             .show()
@@ -458,7 +517,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindButtons() {
         binding.btnSettings.setOnClickListener { showBindingDialog() }
-        binding.tvDevice.setOnClickListener { showBindingDialog() }
+        binding.tvDevice.setOnClickListener { showDeviceMenu() }
 
         binding.btnUp.press { send("key", "code" to "up", "action" to "down") }
         binding.btnDown.press { send("key", "code" to "down", "action" to "down") }

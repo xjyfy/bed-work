@@ -66,6 +66,7 @@ class RemoteWsClient(private val listener: Listener) {
         val request = Request.Builder().url(url).build()
         ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (webSocket !== ws) return          // 已被新连接替换的旧 socket，忽略
                 Log.i(TAG, "ws open, authenticating")
                 lastRxAt = System.currentTimeMillis()
                 val auth = JSONObject()
@@ -76,6 +77,7 @@ class RemoteWsClient(private val listener: Listener) {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (webSocket !== ws) return
                 lastRxAt = System.currentTimeMillis()
                 Log.i(TAG, "ws message: $text")
                 val obj = runCatching { JSONObject(text) }.getOrNull()
@@ -95,12 +97,17 @@ class RemoteWsClient(private val listener: Listener) {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                // 关键：旧 socket 被 cancel/替换后仍会回调，若不判身份就会触发
+                // "重连 → 取消新连接 → 新连接又回调 → 再重连" 的死循环，
+                // 界面表现为每隔几秒闪一次「未连接 / 已连接」。
+                if (webSocket !== ws) return
                 Log.i(TAG, "ws closed: $code $reason")
                 ready = false
                 scheduleReconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (webSocket !== ws) return
                 Log.w(TAG, "ws failure: ${t.message}")
                 ready = false
                 scheduleReconnect()
