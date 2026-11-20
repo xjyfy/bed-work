@@ -13,6 +13,15 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
     </style>
 
+    <!-- 截图浮层：透明窗口 + 半透明底，压在主界面之上 -->
+    <style name="Theme.RemoteMic.Shot" parent="Theme.RemoteMic">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+    </style>
+
     <!-- 紧凑按键：去掉 Material 默认的上下内缩与左右内边距，让两三个字能单行排下 -->
     <style name="Widget.RemoteMic.Key" parent="Widget.Material3.Button">
         <item name="android:textSize">13sp</item>

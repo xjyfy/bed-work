@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import queue
@@ -21,6 +22,8 @@ from typing import Optional
 
 from websockets.asyncio.server import ServerConnection, serve
 
+from . import screencap
+from . import applist
 from .actioner import Actioner
 from .audio_out import AudioOut
 from .store import (
@@ -286,6 +289,8 @@ class RemoteMicService:
                 self._actioner.handle_switcher(msg.get("action", ""))
             elif mtype == "clip":
                 self._handle_clip(msg)
+            elif mtype == "screenshot":
+                await self._handle_screenshot(client)
             elif mtype == "mic":
                 self._audio.set_active(msg.get("action") == "start")
             elif mtype == "switch_active":
@@ -317,6 +322,41 @@ class RemoteMicService:
     def _notify(self, title: str, message: str) -> None:
         if self._tray is not None:
             self._tray.notify(message, title)
+
+    # ------------------------------------------------------------------ 截屏
+
+    async def _handle_screenshot(self, client: _Client) -> None:
+        """抓屏并把 JPEG（base64）回给手机端。
+
+        抓图是阻塞 IO（几十到上百毫秒），放线程里跑，别卡住事件循环；
+        图片只在内存中流转，不落盘。
+        """
+        try:
+            data, width, height = await asyncio.to_thread(screencap.capture_jpeg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("screenshot failed: %s", exc)
+            await self._send_json(client, {"type": "screenshot", "ok": False, "reason": str(exc)})
+            return
+
+        payload = base64.b64encode(data).decode("ascii")
+        logger.info("screenshot sent: %dx%d, %d KB", width, height, len(data) // 1024)
+        await self._send_json(
+            client,
+            {
+                "type": "screenshot",
+                "ok": True,
+                "w": width,
+                "h": height,
+                "bytes": len(data),
+                "image": payload,
+            },
+        )
+
+    async def _send_json(self, client: _Client, payload: dict) -> None:
+        try:
+            await client.ws.send(json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("send failed (%s): %s", payload.get("type"), exc)
 
     # ------------------------------------------------------------------ 连接
 
@@ -399,6 +439,8 @@ class RemoteMicService:
 
     def start(self) -> None:
         self._audio.start()
+        # 后台预热应用列表缓存：设置页打开时要立刻渲染，不能现场枚举（会白屏 1~2 秒）
+        applist.warm_cache_async()
         self._settings_queue = queue.Queue()
         self._stopping = threading.Event()
         self._tray = Tray(

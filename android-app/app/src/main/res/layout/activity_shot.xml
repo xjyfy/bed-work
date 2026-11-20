@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#B3000000">
+
+    <com.willen.remotemic.shot.ZoomImageView
+        android:id="@+id/zoomView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <TextView
+        android:id="@+id/hintText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="24dp"
+        android:background="#66000000"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="6dp"
+        android:text="双指缩放 · 双击复位 · 返回键关闭"
+        android:textColor="#D9FFFFFF"
+        android:textSize="12sp" />
+</FrameLayout>

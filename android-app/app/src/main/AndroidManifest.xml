@@ -34,6 +34,12 @@
             android:screenOrientation="portrait"
             android:theme="@style/Theme.RemoteMic.Scan" />
 
+        <activity
+            android:name=".shot.ShotViewerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.RemoteMic.Shot" />
+
         <service
             android:name=".service.RecorderService"
             android:exported="false"

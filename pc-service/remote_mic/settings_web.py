@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
 import threading
 
 import webview
@@ -132,6 +133,8 @@ tbody tr.pick { cursor:pointer; }
 tbody tr.sel { background:#cfe6ff !important; }
 .panel .pfoot { padding:10px 18px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
 .hint { color:var(--muted); font-size:12px; }
+.icoWrap { width:20px; height:20px; display:inline-block; background:#e8eef6; border-radius:3px; flex:0 0 20px; }
+.icoWrap img { width:20px; height:20px; border-radius:3px; object-fit:contain; display:block; }
 </style>
 </head>
 <body>
@@ -155,7 +158,7 @@ tbody tr.sel { background:#cfe6ff !important; }
   <h2>已绑定遥控器</h2>
   <table>
     <thead><tr><th style="width:34%">名称</th><th style="width:22%">上次 IP</th><th style="width:20%">绑定时间</th><th style="width:14%">状态</th><th></th></tr></thead>
-    <tbody id="remotes"></tbody>
+    <tbody id="remotes"><tr><td colspan="5" class="hint">读取中…</td></tr></tbody>
   </table>
   <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
     <button class="primary" onclick="createBinding()">生成绑定二维码</button>
@@ -174,14 +177,19 @@ tbody tr.sel { background:#cfe6ff !important; }
   <h2>四个应用栏位</h2>
   <table>
     <thead><tr><th style="width:64px">栏位</th><th>应用</th><th style="width:180px">发送快捷键</th><th style="width:118px"></th></tr></thead>
-    <tbody id="slots"></tbody>
+    <tbody id="slots">
+      <tr><td class="num">栏位 1</td><td><div class="appcell"><span class="icoWrap"></span><div><div class="appname">读取中…</div></div></div></td><td><span class="hint">—</span></td><td></td></tr>
+      <tr><td class="num">栏位 2</td><td><div class="appcell"><span class="icoWrap"></span><div><div class="appname">读取中…</div></div></div></td><td><span class="hint">—</span></td><td></td></tr>
+      <tr><td class="num">栏位 3</td><td><div class="appcell"><span class="icoWrap"></span><div><div class="appname">读取中…</div></div></div></td><td><span class="hint">—</span></td><td></td></tr>
+      <tr><td class="num">栏位 4</td><td><div class="appcell"><span class="icoWrap"></span><div><div class="appname">读取中…</div></div></div></td><td><span class="hint">—</span></td><td></td></tr>
+    </tbody>
   </table>
   <div class="hint" style="margin-top:10px">发送键留空=按前台程序自动匹配，匹配不到用 Enter。</div>
 </div>
 
 <footer>
   <button onclick="closeWin()">关闭</button>
-  <button class="primary" onclick="saveAll()">保存</button>
+  <button class="primary" onclick="saveAll(this)">保存</button>
 </footer>
 
 <!-- 应用选择弹层 -->
@@ -209,6 +217,16 @@ tbody tr.sel { background:#cfe6ff !important; }
 
 <script>
 let state = null, apps = null, pickTarget = null, picked = null;
+// 用户在下拉框里改过、但还没保存的快捷键：重渲染时必须保留，否则"选了应用回来就丢了"
+const pendingHotkeys = {};
+
+function hotkeyOf(slot) {
+  if (pendingHotkeys[slot] !== undefined) return pendingHotkeys[slot];
+  const el = document.getElementById('hk-' + slot);
+  if (el) return el.value;
+  const s = state && state.slots.find(x => x.slot === slot);
+  return s ? s.hotkey : '';
+}
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -229,6 +247,17 @@ async function boot() {
   document.getElementById('addrline').textContent = `${state.ip}:${state.port}`;
   renderRemotes();
   renderSlots();
+  loadIcons();          // 图标异步补，不挡首屏
+}
+
+async function loadIcons() {
+  try {
+    const icons = await pywebview.api.get_slot_icons();
+    icons.forEach(x => {
+      const wrap = document.getElementById('ico-' + x.slot);
+      if (wrap && x.icon) wrap.innerHTML = `<img src="${x.icon}" alt="">`;
+    });
+  } catch (e) { /* 图标失败不影响使用 */ }
 }
 
 function renderRemotes() {
@@ -254,13 +283,14 @@ function renderSlots() {
   state.slots.forEach(s => {
     const tr = document.createElement('tr');
     const name = s.name || '未设置';
+    const current = hotkeyOf(s.slot);
     tr.innerHTML = `
       <td class="num">栏位 ${esc(s.slot)}</td>
-      <td><div class="appcell">${iconTag(s.icon)}<div>
+      <td><div class="appcell"><span class="icoWrap" id="ico-${esc(s.slot)}">${s.icon ? `<img src="${s.icon}" alt="">` : ''}</span><div>
         <div class="appname">${esc(name)}</div>
         <div class="apppath">${esc(s.path || '')}</div>
       </div></div></td>
-      <td><select id="hk-${esc(s.slot)}" style="width:100%">${hotkeyOptions(s.hotkey)}</select></td>
+      <td><select id="hk-${esc(s.slot)}" style="width:100%" onchange="pendingHotkeys['${esc(s.slot)}']=this.value">${hotkeyOptions(current)}</select></td>
       <td><button onclick="openPicker('${esc(s.slot)}')" style="white-space:nowrap">选择应用</button></td>`;
     tb.appendChild(tr);
   });
@@ -342,16 +372,21 @@ async function browseExe() {
   closePicker();
 }
 
-async function saveAll() {
+async function saveAll(btn) {
   const payload = {
     computer_name: document.getElementById('computerName').value.trim(),
-    slots: state.slots.map(s => ({ slot: s.slot, hotkey: document.getElementById('hk-' + s.slot).value }))
+    slots: state.slots.map(s => ({ slot: s.slot, hotkey: hotkeyOf(s.slot) }))
   };
-  const res = await pywebview.api.save(payload);
-  document.getElementById('subline').textContent = res.message;
-  state = res.state;
-  renderRemotes();
-  renderSlots();
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    const res = await pywebview.api.save(payload);
+    state = res.state;
+    // 保存成功直接关窗口（用户要求：点保存就关，不用再点一次关闭）
+    await pywebview.api.close_win();
+  } catch (e) {
+    document.getElementById('subline').textContent = '保存失败：' + (e && e.message ? e.message : e);
+    if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+  }
 }
 
 function closeWin() { pywebview.api.close_win(); }
@@ -378,25 +413,41 @@ class SettingsApi:
 
     # ---------------------------------------------------------------- 状态
 
-    def _slots(self) -> list[dict]:
+    def _slots(self, with_icons: bool = False) -> list[dict]:
+        """栏位信息。默认**不扫应用列表、不导出图标**，保证设置页秒开。
+
+        图标由前端拿到骨架后再异步调 get_slot_icons() 补上。
+        """
         cfg = self._service.config
         apps = cfg.get("apps") or {}
         slot_hotkey = cfg.get("slot_send_hotkey") or {}
-        applist.ensure_icons([str(p) for p in apps.values() if p])
+        if with_icons:
+            applist.ensure_icons([str(p) for p in apps.values() if p])
         out = []
         for slot in ["1", "2", "3", "4"]:
             path = str(apps.get(slot) or "")
             name = ""
             icon = ""
             if path:
-                info = applist.describe_app(path)
+                info = applist.describe_app(path, allow_scan=with_icons)
                 name = info.get("name") or ""
-                icon = info.get("icon") or ""
+                if with_icons:
+                    icon = info.get("icon") or ""
+            if not name and path:
+                name = os.path.splitext(os.path.basename(path))[0]
             hk = slot_hotkey.get(slot) or []
             if isinstance(hk, list):
                 hk = "+".join(str(k).lower() for k in hk)
             out.append({"slot": slot, "path": path, "name": name, "icon": icon, "hotkey": str(hk)})
         return out
+
+    def get_slot_icons(self) -> list[dict]:
+        """骨架渲染完之后异步补图标（可能要花几百毫秒导图标）。"""
+        cfg = self._service.config
+        apps = cfg.get("apps") or {}
+        paths = [str(p) for p in apps.values() if p]
+        applist.ensure_icons(paths)
+        return [{"slot": slot, "icon": applist.icon_data_url(str(apps.get(slot) or ""))} for slot in ["1", "2", "3", "4"]]
 
     def _remotes(self) -> list[dict]:
         online = {c[0]: c[2] for c in self._service.active_remote_names()}
@@ -456,7 +507,6 @@ class SettingsApi:
         result = webview.windows[0].create_file_dialog(webview.OPEN_DIALOG, file_types=("可执行文件 (*.exe)",))
         if not result:
             return None
-        import os
 
         path = result[0] if isinstance(result, (list, tuple)) else result
         return {"exe": path, "name": os.path.splitext(os.path.basename(path))[0]}

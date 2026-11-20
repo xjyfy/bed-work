@@ -198,13 +198,16 @@ class MainActivity : AppCompatActivity() {
 
         override fun onMessage(text: String) {
             val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
-            if (obj.optString("type") == "status") {
-                active = obj.optBoolean("active", active)
-                val computer = obj.optString("computer", "")
-                if (computer.isNotBlank() && current != null) {
-                    current = current!!.copy(name = computer)
-                    renderHeader()
+            when (obj.optString("type")) {
+                "status" -> {
+                    active = obj.optBoolean("active", active)
+                    val computer = obj.optString("computer", "")
+                    if (computer.isNotBlank() && current != null) {
+                        current = current!!.copy(name = computer)
+                        renderHeader()
+                    }
                 }
+                "screenshot" -> onScreenshot(obj)
             }
         }
 
@@ -469,6 +472,65 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
+    // ------------------------------------------------------------------ 截屏
+
+    /** 请求电脑端截屏：结果通过 onMessage 的 "screenshot" 帧回来。 */
+    private fun requestScreenshot() {
+        if (!connected) {
+            toast("未连接电脑")
+            return
+        }
+        if (!active) {
+            toast("当前是待命状态，控制权不在这台手机")
+            return
+        }
+        send("screenshot")
+    }
+
+    /**
+     * 收到电脑端的截图：base64 → Bitmap → 全屏浮层显示。
+     *
+     * 解码放工作线程（1600x900 的 JPEG 在主线解会顿一下）；图片只进内存，
+     * 交给 [ShotHolder] 传给查看页，退出即释放，不写任何文件。
+     */
+    private fun onScreenshot(obj: JSONObject) {
+        if (!obj.optBoolean("ok", false)) {
+            toast("截屏失败：${obj.optString("reason", "未知原因")}")
+            return
+        }
+        val b64 = obj.optString("image", "")
+        if (b64.isBlank()) {
+            toast("截屏失败：没有收到图片")
+            return
+        }
+        Thread {
+            val bitmap = runCatching {
+                val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                var sample = 1
+                while (bounds.outWidth / (sample * 2) >= 1600 && bounds.outHeight / (sample * 2) >= 900) {
+                    sample *= 2
+                }
+                android.graphics.BitmapFactory.decodeByteArray(
+                    bytes, 0, bytes.size,
+                    android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                )
+            }.getOrNull()
+
+            runOnUiThread {
+                if (bitmap == null) {
+                    toast("截图解码失败")
+                    return@runOnUiThread
+                }
+                com.willen.remotemic.shot.ShotHolder.set(bitmap)
+                startActivity(
+                    Intent(this, com.willen.remotemic.shot.ShotViewerActivity::class.java)
+                )
+            }
+        }.start()
+    }
+
     // ------------------------------------------------------------------ 语音
 
     private fun startVoice() {
@@ -577,6 +639,7 @@ class MainActivity : AppCompatActivity() {
         binding.appBtn4.click { send("launch", "slot" to "4") }
 
         binding.btnPaste.click { sendClipboard() }
+        binding.btnScreenshot.click { requestScreenshot() }
         binding.btnDelete.click { send("key", "code" to "delete", "action" to "down") }
 
         binding.btnSwitcher.click { send("switcher", "action" to "enter") }

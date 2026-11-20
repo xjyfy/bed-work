@@ -562,7 +562,33 @@ def invalidate_cache() -> None:
     _LIST_CACHE["items"] = []
 
 
-def describe_app(value: str) -> dict:
+def peek_entries() -> list[dict]:
+    """只读现有缓存，**绝不触发枚举**。
+
+    设置页打开时要立刻出界面：枚举一次要跑注册表 + 两次 PowerShell，
+    同步等它就会白屏 1~2 秒。这里拿不到就返回空，由后台预热线程补上。
+    """
+    return _LIST_CACHE["items"]
+
+
+def warm_cache_async() -> None:
+    """服务启动时后台预热一次整表缓存（设置页第一次打开就不用等枚举）。"""
+    import threading
+
+    if _LIST_CACHE["items"]:
+        return
+
+    def run() -> None:
+        try:
+            cached_entries()
+            logger.info("app list cache warmed: %d entries", len(_LIST_CACHE["items"]))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("warm app list cache failed: %s", exc)
+
+    threading.Thread(target=run, daemon=True, name="applist-warm").start()
+
+
+def describe_app(value: str, allow_scan: bool = True) -> dict:
     """把配置里的应用值解析成友好名称 + 图标。
 
     支持三种写法：真实 exe 路径、启动名（Doubao / chrome）、uwp:<AUMID>。
@@ -572,7 +598,7 @@ def describe_app(value: str) -> dict:
         return {"name": "", "icon": "", "resolved": ""}
 
     try:
-        items = cached_entries()
+        items = cached_entries() if allow_scan else peek_entries()
     except Exception:  # noqa: BLE001
         items = []
 
