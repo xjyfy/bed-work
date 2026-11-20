@@ -55,6 +55,8 @@ def default_config() -> dict:
         "slot_send_hotkey": {},
         "remotes": [],
         "apps": {},
+        # 手机传来的文件默认存这里；留空 = 系统「下载」目录
+        "download_dir": "",
     }
 
 
@@ -83,6 +85,10 @@ def ensure_basics(config: dict) -> dict:
     config.setdefault("remotes", [])
     config.setdefault("slot_send_hotkey", {})
     config.setdefault("send_hotkey", {"default": ["enter"]})
+    config.setdefault("download_dir", "")
+    # 老配置里没有这个字段的遥控器，默认允许接收文件
+    for remote in config.get("remotes", []):
+        remote.setdefault("receive_files", True)
     return config
 
 
@@ -94,6 +100,8 @@ def new_remote(name: str = "新遥控器") -> dict:
         "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "last_ip": "",
         "last_seen": "",
+        # 是否允许这台遥控器往电脑传文件（默认开，可在设置页设备列表里单独关）
+        "receive_files": True,
     }
 
 

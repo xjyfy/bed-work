@@ -15,6 +15,7 @@ import threading
 import webview
 
 from . import applist, store
+from . import files as filex
 
 logger = logging.getLogger(__name__)
 
@@ -167,10 +168,25 @@ tbody tr.sel { background:#cfe6ff !important; }
 </div>
 
 <div class="card">
+  <h2>文件互传</h2>
+  <div class="grid2">
+    <label>接收目录</label><div id="fileDir" class="hint">读取中…</div>
+    <label>限制</label><div class="hint" id="fileLimits">—</div>
+  </div>
+  <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+    <button onclick="chooseDir()">更改目录</button>
+    <button onclick="resetDir()">恢复默认</button>
+    <button onclick="openDir()">打开目录</button>
+    <button class="primary" onclick="sendFiles(this)">发送文件到手机…</button>
+    <span class="hint">手机传来的文件默认存系统「下载」目录；改目录立即生效，不用点保存</span>
+  </div>
+</div>
+
+<div class="card">
   <h2>已绑定遥控器</h2>
   <table>
-    <thead><tr><th style="width:34%">名称</th><th style="width:22%">上次 IP</th><th style="width:20%">绑定时间</th><th style="width:14%">状态</th><th></th></tr></thead>
-    <tbody id="remotes"><tr><td colspan="5" class="hint">读取中…</td></tr></tbody>
+    <thead><tr><th style="width:28%">名称</th><th style="width:18%">上次 IP</th><th style="width:16%">绑定时间</th><th style="width:12%">状态</th><th style="width:14%">接收文件</th><th></th></tr></thead>
+    <tbody id="remotes"><tr><td colspan="6" class="hint">读取中…</td></tr></tbody>
   </table>
   <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
     <button class="primary" onclick="createBinding()">生成绑定二维码</button>
@@ -260,6 +276,7 @@ async function boot() {
   renderRemotes();
   renderSlots();
   renderAudio();
+  renderFiles();
   loadIcons();          // 图标异步补，不挡首屏
 }
 
@@ -277,7 +294,7 @@ function renderRemotes() {
   const tb = document.getElementById('remotes');
   tb.innerHTML = '';
   if (!state.remotes.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="hint">还没有绑定的遥控器，点下方按钮生成二维码</td></tr>';
+    tb.innerHTML = '<tr><td colspan="6" class="hint">还没有绑定的遥控器，点下方按钮生成二维码</td></tr>';
     return;
   }
   state.remotes.forEach(r => {
@@ -285,9 +302,54 @@ function renderRemotes() {
     tr.innerHTML = `<td>${esc(r.name)}</td><td class="num">${esc(r.last_ip || '—')}</td>
       <td class="num">${esc(r.added || '—')}</td>
       <td>${r.online ? (r.active ? '控制中' : '在线·待命') : '离线'}</td>
+      <td><label class="hint" style="cursor:pointer"><input type="checkbox" ${r.receive_files ? 'checked' : ''}
+        onchange="toggleRemoteFiles('${esc(r.id)}', this.checked)" style="vertical-align:-2px"> 接收</label></td>
       <td style="text-align:right"><button class="danger" onclick="delRemote('${esc(r.id)}')">删除</button></td>`;
     tb.appendChild(tr);
   });
+}
+
+async function toggleRemoteFiles(id, allow) {
+  const res = await pywebview.api.set_remote_files(id, allow);
+  state.remotes = res.remotes;
+  renderRemotes();
+  document.getElementById('subline').textContent = allow ? '已允许该遥控器传文件' : '已禁止该遥控器传文件';
+}
+
+function renderFiles() {
+  const f = state && state.files;
+  if (!f) return;
+  document.getElementById('fileDir').textContent = f.dir + (f.custom ? '（自定义）' : '（默认下载目录）');
+  document.getElementById('fileLimits').textContent =
+    `单文件 ≤ ${f.max_file}，一次最多 ${f.max_count} 个`;
+}
+
+async function chooseDir() {
+  const res = await pywebview.api.choose_dir();
+  if (res.files) { state.files = res.files; renderFiles(); }
+  document.getElementById('subline').textContent = res.ok ? '保存目录已更新' : '未更改保存目录';
+}
+
+async function resetDir() {
+  const res = await pywebview.api.reset_dir();
+  state.files = res.files; renderFiles();
+  document.getElementById('subline').textContent = '已恢复为系统下载目录';
+}
+
+async function openDir() {
+  const res = await pywebview.api.open_dir();
+  if (!res.ok) document.getElementById('subline').textContent = '打开目录失败：' + (res.reason || '');
+}
+
+async function sendFiles(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '选择中…'; }
+  try {
+    const res = await pywebview.api.send_files();
+    if (res.ok) document.getElementById('subline').textContent = res.message || '已开始发送';
+    else if (res.reason) document.getElementById('subline').textContent = '发送失败：' + res.reason;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '发送文件到手机…'; }
+  }
 }
 
 function renderSlots() {
@@ -504,6 +566,7 @@ class SettingsApi:
                     "added": str(r.get("added", "")),
                     "online": rid in online,
                     "active": bool(online.get(rid)),
+                    "receive_files": bool(r.get("receive_files", True)),
                 }
             )
         return rows
@@ -517,7 +580,79 @@ class SettingsApi:
             "remotes": self._remotes(),
             "slots": self._slots(),
             "audio": self._service.audio_status(),
+            "files": self._files_state(),
         }
+
+    # ---------------------------------------------------------------- 文件互传
+
+    def _files_state(self) -> dict:
+        cfg = self._service.config
+        return {
+            "dir": str(filex.target_dir(cfg)),
+            "default": str(filex.default_dir()),
+            "custom": bool(str(cfg.get("download_dir") or "").strip()),
+            "max_file": filex.describe_size(filex.MAX_FILE_BYTES),
+            "max_count": filex.MAX_FILES_PER_BATCH,
+        }
+
+    def choose_dir(self) -> dict:
+        """弹系统目录选择框，把手机传来文件的保存位置改掉（立即生效，不用点保存）。"""
+        try:
+            import webview
+
+            result = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("choose dir failed: %s", exc)
+            return {"ok": False, "reason": str(exc), "files": self._files_state()}
+        if not result:
+            return {"ok": False, "files": self._files_state()}
+        chosen = result[0] if isinstance(result, (list, tuple)) else str(result)
+        cfg = store.load_config()
+        cfg["download_dir"] = str(chosen)
+        store.save_config(cfg)
+        self._service.reload_config()
+        logger.info("download dir set to %s", chosen)
+        return {"ok": True, "files": self._files_state()}
+
+    def reset_dir(self) -> dict:
+        cfg = store.load_config()
+        cfg["download_dir"] = ""
+        store.save_config(cfg)
+        self._service.reload_config()
+        return {"ok": True, "files": self._files_state()}
+
+    def open_dir(self) -> dict:
+        path = filex.target_dir(self._service.config)
+        try:
+            os.startfile(str(path))  # type: ignore[attr-defined]
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": str(exc)}
+
+    def set_remote_files(self, remote_id: str, allow: bool) -> dict:
+        cfg = store.load_config()
+        for r in cfg.get("remotes", []):
+            if str(r.get("id")) == str(remote_id):
+                r["receive_files"] = bool(allow)
+        store.save_config(cfg)
+        self._service.reload_config()
+        return {"ok": True, "remotes": self._remotes()}
+
+    def send_files(self) -> dict:
+        """设置页：选本地文件后推给控制中的遥控器（手机端落到系统下载目录）。"""
+        try:
+            import webview
+
+            result = webview.windows[0].create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": str(exc)}
+        if not result:
+            return {"ok": False}
+        paths = list(result) if isinstance(result, (list, tuple)) else [str(result)]
+        res = self._service.send_files_to_remote(paths)
+        if res.get("ok"):
+            res["message"] = f"已开始发送 {res.get('count', 0)} 个文件到 {res.get('remote', '手机')}"
+        return res
 
     # ---------------------------------------------------------------- 音频
 

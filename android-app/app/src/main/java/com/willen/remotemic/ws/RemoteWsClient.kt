@@ -9,6 +9,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.Buffer
+import okio.ByteString
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
@@ -28,6 +29,8 @@ class RemoteWsClient(private val listener: Listener) {
         fun onDisconnected()
         fun onMessage(text: String)
         fun onAuthFailed(reason: String)
+        /** 二进制帧（文件块，MAGIC 开头）；默认空实现，只有文件传输会用到 */
+        fun onBinary(bytes: ByteArray) {}
     }
 
     private val client = OkHttpClient.Builder()
@@ -76,6 +79,14 @@ class RemoteWsClient(private val listener: Listener) {
                 webSocket.send(auth.toString())
             }
 
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (webSocket !== ws) return
+                lastRxAt = System.currentTimeMillis()
+                val array = bytes.toByteArray()
+                // 文件块直接在 IO 线程处理（边收边写盘），不切主线程，避免大文件把队列撑爆
+                listener.onBinary(array)
+            }
+
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (webSocket !== ws) return
                 lastRxAt = System.currentTimeMillis()
@@ -85,6 +96,8 @@ class RemoteWsClient(private val listener: Listener) {
                     "auth_ok" -> {
                         ready = true
                         main.post { notifyReady(webSocket, obj.optBoolean("active", false)) }
+                        // 认证帧里带 files_allowed，界面需要据此决定传文件按钮是否可用
+                        main.post { listener.onMessage(text) }
                     }
                     "auth_fail" -> {
                         stopped = true

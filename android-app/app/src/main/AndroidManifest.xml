@@ -8,7 +8,12 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 10 以下才需要写公共下载目录，10+ 走 MediaStore 零权限；limit 到 28 避免商店审核报多余权限 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:allowBackup="true"
@@ -44,5 +49,11 @@
             android:name=".service.RecorderService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- 文件传输期间的短时前台服务：只用于通知栏进度，传完立即停止 -->
+        <service
+            android:name=".service.TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

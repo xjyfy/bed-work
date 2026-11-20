@@ -5,10 +5,13 @@ import android.app.AlertDialog
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -17,6 +20,10 @@ import androidx.core.app.ActivityCompat
 import com.willen.remotemic.audio.AudioBus
 import com.willen.remotemic.databinding.ActivityMainBinding
 import com.willen.remotemic.service.RecorderService
+import com.willen.remotemic.service.TransferService
+import com.willen.remotemic.transfer.FileTransferManager
+import com.willen.remotemic.transfer.TransferBus
+import com.willen.remotemic.transfer.TransferProgress
 import com.willen.remotemic.ws.RemoteWsClient
 import org.json.JSONArray
 import org.json.JSONObject
@@ -53,6 +60,47 @@ class MainActivity : AppCompatActivity() {
 
     private val prefs by lazy { getSharedPreferences("remote_mic", MODE_PRIVATE) }
 
+    // ------------------------------------------------------------------ 文件互传
+    private lateinit var fileTransfer: FileTransferManager
+    private var transferDialog: AlertDialog? = null
+    private var transferProgressBar: ProgressBar? = null
+    private var transferNameView: TextView? = null
+    private var transferDetailView: TextView? = null
+    private var transferTitleView: TextView? = null
+    private var transferObserver: ((TransferProgress?) -> Unit)? = null
+
+    /** 照片/视频：系统 Photo Picker（无需任何存储权限），最多 50 张 */
+    private val pickMediaLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != RESULT_OK) return@registerForActivityResult
+        val uris = collectUris(result.data) ?: return@registerForActivityResult
+        if (uris.isEmpty()) return@registerForActivityResult
+        startSendUris(uris)
+    }
+
+    /** 通用文件：SAF 的 ACTION_OPEN_DOCUMENT（同样无需存储权限），支持多选 */
+    private val pickFileLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != RESULT_OK) return@registerForActivityResult
+        val uris = collectUris(result.data) ?: return@registerForActivityResult
+        if (uris.isEmpty()) return@registerForActivityResult
+        startSendUris(uris)
+    }
+
+    private fun collectUris(data: Intent?): List<Uri>? {
+        if (data == null) return null
+        val clip = data.clipData
+        if (clip != null && clip.itemCount > 0) {
+            val list = mutableListOf<Uri>()
+            for (i in 0 until clip.itemCount) list.add(clip.getItemAt(i).uri)
+            return list
+        }
+        data.data?.let { return listOf(it) }
+        return null
+    }
+
     // 扫码绑定：扫到 PC 设置页的二维码后新增设备并立刻连接
     private val scanLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
@@ -78,6 +126,16 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         client = buildClient()
+
+        // 传输线程里回调也走这里，Toast 必须切回主线程（否则直接崩：
+        // "Can't toast on a thread that has not called Looper.prepare()"）
+        fileTransfer = FileTransferManager(this, { client }) { title, message ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                Toast.makeText(this, if (title.isBlank()) message else "$title：$message", Toast.LENGTH_SHORT).show()
+            }
+        }
+        observeTransfer()
 
         AudioBus.onPcm = { pcm -> client.sendBinary(pcm) }
 
@@ -208,9 +266,19 @@ class MainActivity : AppCompatActivity() {
                         renderHeader()
                     }
                 }
+                "auth_ok" -> fileTransfer.allowed = obj.optBoolean("files_allowed", true)
+                "files_allowed" -> {
+                    fileTransfer.allowed = obj.optBoolean("allow", true)
+                    toast(if (fileTransfer.allowed) "电脑端已允许传文件" else "电脑端已关闭文件接收")
+                }
                 "screenshot" -> onScreenshot(obj)
                 "apps" -> onAppsFrame(obj)
+                "file_offer", "file_end", "file_reject", "file_result" -> fileTransfer.onText(obj)
             }
+        }
+
+        override fun onBinary(bytes: ByteArray) {
+            fileTransfer.onBinary(bytes)
         }
 
         override fun onAuthFailed(reason: String) {
@@ -433,6 +501,187 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendHello() {
         send("hello", "device" to android.os.Build.MODEL, "ts" to System.currentTimeMillis())
+    }
+
+    // ------------------------------------------------------------------ 文件互传
+
+    private fun canTransfer(): Boolean {
+        if (!connected) {
+            toast("未连接电脑")
+            return false
+        }
+        if (!fileTransfer.allowed) {
+            toast("电脑端已关闭这台遥控器的文件接收")
+            return false
+        }
+        if (fileTransfer.isBusy()) {
+            toast("正在传输，稍等一下")
+            return false
+        }
+        return true
+    }
+
+    /** 照片/视频：系统 Photo Picker（Android 13+ 的系统 UI，零存储权限） */
+    private fun pickMedia() {
+        if (!canTransfer()) return
+        val intent = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            Intent("android.provider.action.PICK_IMAGES")
+                .setType("image/*")
+                .putExtra("android.provider.extra.PICK_IMAGES_MAX", FileTransferManager.MAX_COUNT)
+        } else {
+            Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("image/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        try {
+            pickMediaLauncher.launch(intent)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "photo picker unavailable: ${e.message}")
+            pickDocument()
+        }
+    }
+
+    /** 通用文件：SAF 的 ACTION_OPEN_DOCUMENT，PDF/压缩包/视频都能选，零存储权限 */
+    private fun pickDocument() {
+        if (!canTransfer()) return
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        try {
+            pickFileLauncher.launch(intent)
+        } catch (e: Exception) {
+            toast("系统文件选择器不可用：${e.message}")
+        }
+    }
+
+    private fun startSendUris(uris: List<Uri>) {
+        if (!canTransfer()) return
+        if (uris.size > FileTransferManager.MAX_COUNT) {
+            toast("一次最多 ${FileTransferManager.MAX_COUNT} 个文件")
+            return
+        }
+        fileTransfer.sendUris(uris)
+        // 先起前台服务再开传：小文件几百毫秒就传完，若等服务启动完再判断"已完成"，
+        // 会出现 stopService 早于 startForeground，系统直接杀进程。
+        startTransferService()
+        showTransferDialog()
+    }
+
+    private var transferServiceStarted = false
+    private var transferServiceStartedAt = 0L
+    private var transferStopScheduled = false
+
+    private fun observeTransfer() {
+        if (transferObserver != null) return
+        val observer: (TransferProgress?) -> Unit = { p ->
+            uiHandler.post {
+                when {
+                    p == null -> dismissTransferDialog()
+                    p.finished -> {
+                        updateTransferViews(p)
+                        uiHandler.postDelayed({ dismissTransferDialog() }, 600)
+                        if (p.error != null) {
+                            if (p.error != "已取消") toast("传输失败：${p.error}")
+                        } else {
+                            toast(if (p.sending) "发送完成" else "已接收文件")
+                        }
+                        stopTransferService()
+                        uiHandler.postDelayed({ if (TransferBus.current?.finished == true) TransferBus.publish(null) }, 1200)
+                    }
+                    else -> {
+                        showTransferDialog()
+                        updateTransferViews(p)
+                        startTransferService()
+                    }
+                }
+            }
+        }
+        transferObserver = observer
+        TransferBus.observe(observer)
+    }
+
+    private fun startTransferService() {
+        if (transferServiceStarted) return
+        transferServiceStarted = true
+        transferServiceStartedAt = android.os.SystemClock.elapsedRealtime()
+        transferStopScheduled = false
+        try {
+            TransferService.start(this)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "start transfer service failed: ${e.message}")
+            transferServiceStarted = false
+        }
+    }
+
+    /** 停止前台服务：必须晚于 startForegroundService + 5s，否则系统判"超时未进前台"直接杀进程。 */
+    private fun stopTransferService() {
+        if (!transferServiceStarted || transferStopScheduled) return
+        transferStopScheduled = true
+        val elapsed = android.os.SystemClock.elapsedRealtime() - transferServiceStartedAt
+        val wait = (6000L - elapsed).coerceAtLeast(600L)
+        uiHandler.postDelayed({ stopTransferServiceNow() }, wait)
+    }
+
+    private fun stopTransferServiceNow() {
+        transferStopScheduled = false
+        if (!transferServiceStarted) return
+        transferServiceStarted = false
+        try {
+            TransferService.stop(this)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun showTransferDialog() {
+        if (isFinishing || isDestroyed) return
+        if (transferDialog?.isShowing == true) return
+        val view = layoutInflater.inflate(R.layout.dialog_transfer, null)
+        transferTitleView = view.findViewById(R.id.tvTransferTitle)
+        transferNameView = view.findViewById(R.id.tvTransferName)
+        transferDetailView = view.findViewById(R.id.tvTransferDetail)
+        transferProgressBar = view.findViewById(R.id.progressTransfer)
+        view.findViewById<Button>(R.id.btnTransferCancel).setOnClickListener {
+            fileTransfer.cancel()
+            dismissTransferDialog()
+        }
+        // 后台传递：只收起浮窗，传输继续，进度交给通知栏（遥控器界面照常可用）
+        view.findViewById<Button>(R.id.btnTransferBackground).setOnClickListener {
+            dismissTransferDialog()
+            toast("已转到后台，进度见通知栏")
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setView(view)
+            .setCancelable(true)
+            .create()
+        dialog.setOnCancelListener { /* 按返回键=后台传递，不打断传输 */ }
+        dialog.show()
+        transferDialog = dialog
+        TransferBus.current?.let { updateTransferViews(it) }
+    }
+
+    private fun dismissTransferDialog() {
+        try {
+            transferDialog?.dismiss()
+        } catch (_: Exception) {
+        }
+        transferDialog = null
+    }
+
+    private fun updateTransferViews(p: TransferProgress) {
+        transferTitleView?.text = when {
+            p.error != null -> "传输失败"
+            p.finished -> "传输完成"
+            p.sending -> "正在发送到电脑"
+            else -> "正在接收电脑文件"
+        }
+        transferNameView?.text = p.summary()
+        transferDetailView?.text = p.detail()
+        transferProgressBar?.let {
+            it.isIndeterminate = p.bytesTotal <= 0 || p.finished
+            it.progress = p.percent
+        }
     }
 
     // ------------------------------------------------------------------ 远程粘贴
@@ -720,6 +969,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnScreenshot.click { requestScreenshot() }
         binding.btnDelete.click { send("key", "code" to "delete", "action" to "down") }
 
+        binding.btnSendMedia.click { pickMedia() }
+        binding.btnSendFile.click { pickDocument() }
+
         binding.btnSwitcher.click { send("switcher", "action" to "enter") }
         binding.btnTabSwitch.click { send("key", "code" to "tab_next", "action" to "down") }
 
@@ -748,6 +1000,9 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         cancelPendingVoiceStop()
         AudioBus.onPcm = null
+        transferObserver?.let { TransferBus.forget(it) }
+        transferObserver = null
+        dismissTransferDialog()
         runCatching { unregisterReceiver(screenReceiver) }
         client.close()
         super.onDestroy()

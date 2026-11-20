@@ -16,14 +16,17 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import queue
 import threading
+import uuid
 from typing import Optional
 
 from websockets.asyncio.server import ServerConnection, serve
 
 from . import screencap
 from . import applist
+from . import files as filex
 from .actioner import Actioner
 from .audio_out import AudioOut
 from .store import (
@@ -47,14 +50,23 @@ CLIP_MAX_CHARS = 100_000
 
 
 class _Client:
-    __slots__ = ("remote_id", "name", "ws", "ip", "seq")
+    __slots__ = (
+        "remote_id", "name", "ws", "ip", "seq",
+        "allow_files", "rx", "rx_saved", "accept_events", "tx_lock",
+    )
 
-    def __init__(self, remote_id: str, name: str, ws: ServerConnection, ip: str, seq: int):
+    def __init__(self, remote_id: str, name: str, ws: ServerConnection, ip: str, seq: int,
+                 allow_files: bool = True):
         self.remote_id = remote_id
         self.name = name
         self.ws = ws
         self.ip = ip
         self.seq = seq
+        self.allow_files = allow_files
+        self.rx: Optional[filex.Receiver] = None      # 手机→电脑的当前接收会话
+        self.rx_saved: list[str] = []                  # 本轮已落盘的文件名
+        self.accept_events: dict[str, asyncio.Event] = {}  # 电脑→手机：手机接受传输的信号
+        self.tx_lock = asyncio.Lock()                  # 同一时刻只推一个文件，别把通道挤爆
 
 
 class RemoteMicService:
@@ -97,10 +109,24 @@ class RemoteMicService:
         except Exception as exc:  # noqa: BLE001
             logger.error("reload config failed: %s", exc)
             return
-        for key in ("apps", "send_hotkey", "slot_send_hotkey", "computer_name", "voice_hotkey", "remotes"):
+        for key in ("apps", "send_hotkey", "slot_send_hotkey", "computer_name", "voice_hotkey", "remotes",
+                    "download_dir"):
             if key in fresh:
                 self._config[key] = fresh[key]
         logger.info("config reloaded from disk")
+        # 文件接收开关可能被改了：同步到在线客户端并通知手机端按钮状态
+        for c in self._clients:
+            remote = next((r for r in self._config.get("remotes", []) if r.get("id") == c.remote_id), None)
+            if remote is None:
+                continue
+            allow = bool(remote.get("receive_files", True))
+            if allow != c.allow_files:
+                c.allow_files = allow
+                if self._loop is not None and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._send_json(c, {"type": "files_allowed", "allow": allow}), self._loop
+                    )
+                logger.info("file receive switch for %s -> %s", c.name, allow)
 
     # ------------------------------------------------------------------ 状态
 
@@ -147,6 +173,13 @@ class RemoteMicService:
     def _find_client(self, remote_id: str) -> Optional[_Client]:
         return next((c for c in self._clients if c.remote_id == remote_id), None)
 
+    async def _close_quietly(self, ws: ServerConnection, timeout: float = 1.5) -> None:
+        """带超时的关闭：死连接握手可能永远等不到回包，绝不能无限期阻塞。"""
+        try:
+            await asyncio.wait_for(ws.close(code=1000, reason="replaced"), timeout=timeout)
+        except Exception:  # noqa: BLE001
+            pass
+
     # ------------------------------------------------------------------ 认证
 
     async def _authenticate(self, ws: ServerConnection, msg: dict) -> Optional[_Client]:
@@ -169,10 +202,9 @@ class RemoteMicService:
                     self._clients.remove(c)
         for c in stale:
             logger.info("replace stale connection of %s (%s)", c.name, c.ip)
-            try:
-                await c.ws.close(code=1000, reason="replaced")
-            except Exception:  # noqa: BLE001
-                pass
+            # 不能 await：对已失联的 socket，close() 要等完整的关闭握手（默认 10s），
+            # 一旦卡在认证路径上就把整个事件循环堵住 —— 表现为 ping 不回、手机反复重连。
+            asyncio.create_task(self._close_quietly(c.ws))
 
         self._seq += 1
         client = _Client(
@@ -181,7 +213,9 @@ class RemoteMicService:
             ws=ws,
             ip=(ws.remote_address[0] if ws.remote_address else ""),
             seq=self._seq,
+            allow_files=bool(remote.get("receive_files", True)),
         )
+        client.rx_saved = []
         with self._lock:
             self._clients.append(client)
             touch_remote(remote, device_name=client.name, ip=client.ip)
@@ -197,6 +231,8 @@ class RemoteMicService:
                     "active": active,
                     "computer": self._config.get("computer_name") or computer_name(),
                     "status": self._status_frame(),
+                    # 手机端据此决定「传文件」按钮是否可用
+                    "files_allowed": client.allow_files,
                 },
                 ensure_ascii=False,
             )
@@ -211,6 +247,9 @@ class RemoteMicService:
     def _unregister(self, client: Optional[_Client]) -> None:
         if client is None:
             return
+        if client.rx is not None:
+            client.rx.abort()
+            client.rx = None
         with self._lock:
             if client in self._clients:
                 self._clients.remove(client)
@@ -296,6 +335,14 @@ class RemoteMicService:
                 await self._handle_screenshot(client)
             elif mtype == "mic":
                 self._audio.set_active(msg.get("action") == "start")
+            elif mtype == "file_begin":
+                await self._handle_file_begin(client, msg)
+            elif mtype == "file_end":
+                await self._handle_file_end(client, msg)
+            elif mtype == "file_abort":
+                self._abort_receive(client, str(msg.get("reason") or "手机取消"))
+            elif mtype == "file_accept":
+                self._handle_accept(client, msg)
             elif mtype == "switch_active":
                 self.switch_active(str(msg.get("id", "")))
             else:
@@ -442,6 +489,204 @@ class RemoteMicService:
         except Exception as exc:  # noqa: BLE001
             logger.info("send failed (%s): %s", payload.get("type"), exc)
 
+    # ------------------------------------------------------------------ 文件互传
+
+    async def _handle_file_begin(self, client: _Client, msg: dict) -> None:
+        """手机要传一个文件过来：先校验开关/数量/大小，再准备 `.part` 接收。"""
+        if not client.allow_files:
+            await self._send_json(client, {
+                "type": "file_reject",
+                "transfer_id": str(msg.get("transfer_id") or ""),
+                "reason": "这台电脑已关闭该遥控器的文件接收",
+            })
+            logger.info("file rejected (disabled) from %s", client.name)
+            return
+
+        index = int(msg.get("index") or 1)
+        count = int(msg.get("count") or 1)
+        if count > filex.MAX_FILES_PER_BATCH:
+            await self._send_json(client, {
+                "type": "file_reject",
+                "transfer_id": str(msg.get("transfer_id") or ""),
+                "reason": f"一次最多传 {filex.MAX_FILES_PER_BATCH} 个文件",
+            })
+            return
+        if index > filex.MAX_FILES_PER_BATCH:
+            await self._send_json(client, {
+                "type": "file_reject",
+                "transfer_id": str(msg.get("transfer_id") or ""),
+                "reason": f"超过单次 {filex.MAX_FILES_PER_BATCH} 个文件的上限",
+            })
+            return
+        size = int(msg.get("size") or 0)
+        if size > filex.MAX_FILE_BYTES:
+            await self._send_json(client, {
+                "type": "file_reject",
+                "transfer_id": str(msg.get("transfer_id") or ""),
+                "reason": f"单个文件上限 {filex.describe_size(filex.MAX_FILE_BYTES)}",
+            })
+            return
+
+        self._abort_receive(client, "上一个传输未完成", notify=False)
+        folder = filex.target_dir(self._config)
+        try:
+            client.rx = filex.Receiver(folder, str(msg.get("name") or ""), size,
+                                       str(msg.get("transfer_id") or ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("open receive file failed: %s", exc)
+            await self._send_json(client, {
+                "type": "file_reject",
+                "transfer_id": str(msg.get("transfer_id") or ""),
+                "reason": f"电脑端无法创建文件：{exc}",
+            })
+            return
+
+        if index == 1:
+            client.rx_saved = []
+        logger.info(
+            "file begin: %s (%s) %d/%d from %s",
+            client.rx.name, filex.describe_size(size), index, count, client.name,
+        )
+        await self._send_json(client, {
+            "type": "file_ack",
+            "transfer_id": client.rx.transfer_id,
+            "name": client.rx.name,
+        })
+
+    def _feed_file_chunk(self, client: _Client, data: bytes) -> None:
+        """二进制块落到当前接收会话；写盘异常直接中止并告知手机。"""
+        rx = client.rx
+        if rx is None:
+            return
+        try:
+            rx.write(data)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("write file chunk failed: %s", exc)
+            self._abort_receive(client, str(exc))
+            self._notify("文件接收失败", str(exc))
+
+    async def _handle_file_end(self, client: _Client, msg: dict) -> None:
+        rx = client.rx
+        if rx is None:
+            return
+        client.rx = None
+        try:
+            saved = rx.finish()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("file end failed: %s", exc)
+            rx.abort()
+            self._notify("文件接收失败", str(exc))
+            await self._send_json(client, {
+                "type": "file_result", "transfer_id": str(msg.get("transfer_id") or ""),
+                "ok": False, "reason": str(exc),
+            })
+            return
+        client.rx_saved.append(saved.name)
+        self._notify("收到文件", f"{saved.name} → {saved.parent}")
+        await self._send_json(client, {
+            "type": "file_result",
+            "transfer_id": str(msg.get("transfer_id") or ""),
+            "ok": True,
+            "name": saved.name,
+            "dir": str(saved.parent),
+            "count": len(client.rx_saved),
+        })
+
+    def _abort_receive(self, client: _Client, reason: str = "取消", notify: bool = True) -> None:
+        rx = client.rx
+        if rx is None:
+            return
+        client.rx = None
+        name = rx.name
+        rx.abort()
+        logger.info("file aborted: %s (%s)", name, reason)
+        if notify:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_json(client, {"type": "file_result", "transfer_id": rx.transfer_id,
+                                             "ok": False, "reason": reason}),
+                    self._loop,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _handle_accept(self, client: _Client, msg: dict) -> None:
+        tid = str(msg.get("transfer_id") or "")
+        ev = client.accept_events.get(tid)
+        if ev is not None and not ev.is_set():
+            ev.set()
+
+    # 电脑→手机 --------------------------------------------------------
+
+    def send_files_to_remote(self, paths: list[str], remote_id: str = "") -> dict:
+        """设置页/托盘调用：把本地若干个文件推给手机（默认给控制中的那台）。"""
+        paths = [str(p) for p in paths if p and os.path.exists(p)]
+        if not paths:
+            return {"ok": False, "reason": "没有可发送的文件"}
+        if len(paths) > filex.MAX_FILES_PER_BATCH:
+            return {"ok": False, "reason": f"一次最多 {filex.MAX_FILES_PER_BATCH} 个文件"}
+        for p in paths:
+            if os.path.getsize(p) > filex.MAX_FILE_BYTES:
+                return {"ok": False, "reason": f"{os.path.basename(p)} 超过 2GB 上限"}
+        if self._loop is None or not self._loop.is_running():
+            return {"ok": False, "reason": "服务未就绪"}
+
+        target = self._find_client(remote_id) if remote_id else self._find_client(self._active_id or "")
+        if target is None:
+            return {"ok": False, "reason": "没有在线的遥控器"}
+
+        asyncio.run_coroutine_threadsafe(self._push_files(target, paths), self._loop)
+        logger.info("push %d file(s) to %s: %s", len(paths), target.name, [os.path.basename(p) for p in paths])
+        return {"ok": True, "count": len(paths), "remote": target.name}
+
+    async def _push_files(self, client: _Client, paths: list[str]) -> None:
+        total = len(paths)
+        for idx, path in enumerate(paths, start=1):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            tid = uuid.uuid4().hex[:12]
+            ev = asyncio.Event()
+            client.accept_events[tid] = ev
+            await self._send_json(client, {
+                "type": "file_offer",
+                "transfer_id": tid,
+                "name": os.path.basename(path),
+                "size": size,
+                "mime": filex.guess_mime(path),
+                "index": idx,
+                "count": total,
+            })
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=20)
+            except asyncio.TimeoutError:
+                logger.info("file offer timeout: %s", os.path.basename(path))
+                client.accept_events.pop(tid, None)
+                continue
+            client.accept_events.pop(tid, None)
+            async with client.tx_lock:
+                try:
+                    with open(path, "rb") as fh:
+                        while True:
+                            chunk = await asyncio.to_thread(fh.read, filex.CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            await client.ws.send(filex.MAGIC + chunk)
+                    await self._send_json(client, {
+                        "type": "file_end", "transfer_id": tid, "ok": True,
+                        "name": os.path.basename(path),
+                    })
+                    logger.info("file pushed: %s (%.1f MB) -> %s", os.path.basename(path),
+                                size / 1048576, client.name)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("push file failed: %s", exc)
+                    try:
+                        await self._send_json(client, {"type": "file_end", "transfer_id": tid,
+                                                       "ok": False, "reason": str(exc)})
+                    except Exception:  # noqa: BLE001
+                        pass
+
     # ------------------------------------------------------------------ 连接
 
     async def _handler(self, websocket: ServerConnection) -> None:
@@ -451,6 +696,11 @@ class RemoteMicService:
             try:
                 async for raw in websocket:
                     if isinstance(raw, bytes):
+                        if raw[:4] == filex.MAGIC:
+                            # 文件块，前缀 4 字节 MAGIC，剩余是数据（要和语音 PCM 区分）
+                            if client is not None:
+                                self._feed_file_chunk(client, raw[4:])
+                            continue
                         if client is not None and self._is_active(client):
                             self._audio_frames += 1
                             self._audio_bytes += len(raw)
@@ -538,6 +788,11 @@ class RemoteMicService:
 
     def start(self) -> None:
         self._audio.start()
+        # 清理上次异常退出留下的半截文件（.part_*），保持下载目录干净
+        try:
+            filex.cleanup_old_parts(filex.target_dir(self._config))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cleanup old .part failed: %s", exc)
         # 后台预热应用列表缓存：设置页打开时要立刻渲染，不能现场枚举（会白屏 1~2 秒）
         applist.warm_cache_async()
         threading.Thread(target=self._warm_app_icons, daemon=True, name="slot-icons").start()
