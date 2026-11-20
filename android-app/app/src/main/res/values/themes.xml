@@ -7,6 +7,12 @@
         <item name="android:textColor">@color/on_surface</item>
     </style>
 
+    <!-- 扫码页：全屏、黑底，相机预览铺满 -->
+    <style name="Theme.RemoteMic.Scan" parent="Theme.RemoteMic">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+    </style>
+
     <!-- 紧凑按键：去掉 Material 默认的上下内缩与左右内边距，让两三个字能单行排下 -->
     <style name="Widget.RemoteMic.Key" parent="Widget.Material3.Button">
         <item name="android:textSize">13sp</item>

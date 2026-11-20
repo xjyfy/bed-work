@@ -14,8 +14,6 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import com.willen.remotemic.audio.AudioBus
 import com.willen.remotemic.databinding.ActivityMainBinding
 import com.willen.remotemic.service.RecorderService
@@ -56,8 +54,11 @@ class MainActivity : AppCompatActivity() {
     private val prefs by lazy { getSharedPreferences("remote_mic", MODE_PRIVATE) }
 
     // 扫码绑定：扫到 PC 设置页的二维码后新增设备并立刻连接
-    private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
-        val content = result.contents
+    private val scanLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != RESULT_OK) return@registerForActivityResult
+        val content = result.data?.getStringExtra(com.willen.remotemic.scan.QrScanActivity.EXTRA_CONTENT)
         if (content.isNullOrBlank()) return@registerForActivityResult
         val device = parseQr(content)
         if (device == null) {
@@ -381,13 +382,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startScan() {
-        val opts = ScanOptions().apply {
-            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            setPrompt("对准电脑端设置页的绑定二维码")
-            setBeepEnabled(false)
-            setOrientationLocked(false)
-        }
-        scanLauncher.launch(opts)
+        // 自建竖屏扫码页（CameraX + ZXing core），替换掉原来横屏的 journeyapps CaptureActivity
+        scanLauncher.launch(
+            Intent(this, com.willen.remotemic.scan.QrScanActivity::class.java)
+        )
     }
 
     private fun showManualAdd() {

@@ -28,6 +28,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".scan.QrScanActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.RemoteMic.Scan" />
+
         <service
             android:name=".service.RecorderService"
             android:exported="false"
