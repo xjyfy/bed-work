@@ -63,6 +63,13 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ 文件互传
     private lateinit var fileTransfer: FileTransferManager
     private var transferDialog: AlertDialog? = null
+
+    /**
+     * 设备管理列表的重建函数，对话框显示期间有效。
+     * 扫码新增 / 手动添加 / 连接状态变化后调用它，列表立刻更新，
+     * 不用再"关掉设置再重新打开"才能看到新电脑。
+     */
+    private var deviceListRefresh: (() -> Unit)? = null
     private var transferProgressBar: ProgressBar? = null
     private var transferNameView: TextView? = null
     private var transferDetailView: TextView? = null
@@ -117,6 +124,8 @@ class MainActivity : AppCompatActivity() {
         devices.add(device)
         saveDevices()
         connectTo(device)
+        // 扫码页返回时设备管理对话框还开着，这里立刻重建列表，否则要退出重进才看得到新电脑
+        deviceListRefresh?.invoke()
         Toast.makeText(this, "已绑定 ${device.name}", Toast.LENGTH_SHORT).show()
     }
 
@@ -320,6 +329,8 @@ class MainActivity : AppCompatActivity() {
                 else -> 0xFF9E9E9E.toInt()
             }
         )
+        // 连接状态一变（扫码后建连、切换设备、掉线）就同步刷新设备管理列表里的圆点
+        deviceListRefresh?.invoke()
     }
 
     private fun isOnline(device: Device): Boolean =
@@ -447,11 +458,14 @@ class MainActivity : AppCompatActivity() {
         }
         rebuild()
 
-        AlertDialog.Builder(this)
+        val console = AlertDialog.Builder(this)
             .setTitle("设备管理")
             .setView(scroll)
             .setNegativeButton("关闭", null)
-            .show()
+            .create()
+        deviceListRefresh = { rebuild() }
+        console.setOnDismissListener { deviceListRefresh = null }
+        console.show()
     }
 
     private fun startScan() {
@@ -485,6 +499,7 @@ class MainActivity : AppCompatActivity() {
                 devices.add(device)
                 saveDevices()
                 connectTo(device)
+                deviceListRefresh?.invoke()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -995,6 +1010,8 @@ class MainActivity : AppCompatActivity() {
         } else if (!connected) {
             client.wakeUp()
         }
+        // 从扫码页/手动添加返回时，若设备管理对话框还开着，顺手刷一遍（连接状态也会跟着变绿）
+        deviceListRefresh?.invoke()
     }
 
     override fun onDestroy() {
