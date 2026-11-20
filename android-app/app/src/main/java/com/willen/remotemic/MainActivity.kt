@@ -271,6 +271,13 @@ class MainActivity : AppCompatActivity() {
                     active = obj.optBoolean("active", active)
                     val computer = obj.optString("computer", "")
                     if (computer.isNotBlank() && current != null) {
+                        // 电脑真名只有连上之后才知道（手动输入 IP 添加时只能先记 IP）：
+                        // 收到就回填进已绑定列表并落盘，设备管理/下拉列表以后都显示电脑名。
+                        val idx = devices.indexOfFirst { it.token == current!!.token }
+                        if (idx >= 0 && devices[idx].name != computer) {
+                            devices[idx] = devices[idx].copy(name = computer)
+                            saveDevices()
+                        }
                         current = current!!.copy(name = computer)
                         renderHeader()
                     }
