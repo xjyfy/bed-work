@@ -789,7 +789,12 @@ class Actioner:
             if os.path.exists(path):
                 os.startfile(path)  # type: ignore[attr-defined]
             else:
-                subprocess.Popen(path, shell=True)
+                # shell=True 会先起一个 cmd.exe；本进程无控制台时会多闪一个黑框，故显式隐藏
+                subprocess.Popen(
+                    path,
+                    shell=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
             logger.info("launched slot %s: %s", slot, path)
             self._tab_index = 0
         except Exception as exc:  # noqa: BLE001

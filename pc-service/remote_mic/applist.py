@@ -19,6 +19,11 @@ from . import paths
 
 logger = logging.getLogger(__name__)
 
+# GUI 子系统进程（PyInstaller console=False）没有控制台，直接调控制台程序（pwsh / powershell）
+# 会为每个子进程新建一个黑框窗口 —— 首次运行枚举应用时就是"弹一堆终端"。
+# CREATE_NO_WINDOW 让子进程不创建控制台窗口，输出照样能通过管道读回来。
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 # 明显是卸载/更新/安装器的关键字，不进应用列表
 _EXE_BLOCK = re.compile(
     r"(^unins|uninstall|uninst|setup|update|updater|repair|remove|卸载|安装|install\.exe)",
@@ -267,6 +272,7 @@ def _run_pwsh(script: str) -> str:
                 timeout=40,
                 encoding="utf-8",
                 errors="ignore",
+                creationflags=CREATE_NO_WINDOW,
             )
             if (out.stdout or "").strip():
                 return out.stdout.strip()
@@ -294,6 +300,7 @@ def _run_ps1(script_path: str) -> str:
                 timeout=60,
                 encoding="utf-8",
                 errors="ignore",
+                creationflags=CREATE_NO_WINDOW,
             )
             if out.returncode == 0:
                 return (out.stdout or "").strip()

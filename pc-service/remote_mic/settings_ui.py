@@ -32,6 +32,7 @@ def installed_apps() -> list[tuple[str, str]]:
 
 def _run_pwsh(script: str) -> str:
     """调用 pwsh / powershell 拿 JSON，出错返回空串。"""
+    import os
     import shutil
     import subprocess
 
@@ -46,6 +47,8 @@ def _run_pwsh(script: str) -> str:
             timeout=20,
             encoding="utf-8",
             errors="ignore",
+            # GUI 进程没有控制台，不加这个每个 pwsh 调用都会闪一个黑框
+            creationflags=0x08000000 if os.name == "nt" else 0,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("pwsh call failed: %s", exc)
