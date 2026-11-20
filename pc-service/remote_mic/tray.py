@@ -1,4 +1,7 @@
-"""系统托盘：连接状态、控制权切换、设置页入口、刷新声卡 / 退出。"""
+"""系统托盘：连接状态、控制权切换、设置页入口、退出。
+
+（"刷新声卡设备"已移到设置页的「音频输出」卡片里，托盘只留日常入口。）
+"""
 
 from __future__ import annotations
 
@@ -22,12 +25,10 @@ class Tray:
     def __init__(
         self,
         on_quit: Callable[[], None],
-        on_refresh_audio: Callable[[], None],
         on_open_settings: Optional[Callable[[], None]] = None,
         on_switch_remote: Optional[Callable[[str], None]] = None,
     ):
         self._on_quit = on_quit
-        self._on_refresh_audio = on_refresh_audio
         self._on_open_settings = on_open_settings
         self._on_switch_remote = on_switch_remote
         self._icon: Optional[Icon] = None
@@ -91,7 +92,6 @@ class Tray:
             MenuItem(lambda _: f"状态：{self._status}", None, enabled=False),
             MenuItem("切换控制遥控器", self._switch_menu()),
             MenuItem("设置…", lambda _: self._open_settings()),
-            MenuItem("刷新声卡设备", lambda _: self._on_refresh_audio()),
             MenuItem("退出", lambda _: self._quit()),
         )
 

@@ -203,6 +203,8 @@ class RemoteMicService:
         )
         logger.info("remote bound: %s (%s) active=%s", client.name, client.ip, active)
         await self._broadcast_status()
+        # 认证完就把四个快捷栏位的名称/图标发过去，手机端按钮不用等用户操作才有图标
+        await self._send_json(client, self._apps_frame())
         return client
 
     def _unregister(self, client: Optional[_Client]) -> None:
@@ -323,6 +325,46 @@ class RemoteMicService:
         if self._tray is not None:
             self._tray.notify(message, title)
 
+    # ------------------------------------------------------------------ 快捷应用
+
+    def _apps_frame(self) -> dict:
+        """四个快捷栏位的名称 + 图标（data URL），推给手机端给按钮上图标。
+
+        图标只读本地缓存 PNG（`icon_data_url` 不触发导出），导出动作在服务启动
+        的预热线程里做过；缓存缺失时 icon 为空，手机端就继续显示文字。
+        """
+        cfg = self._config
+        apps = cfg.get("apps") or {}
+        slots = []
+        for slot in ("1", "2", "3", "4"):
+            path = str(apps.get(slot) or "")
+            name = ""
+            icon = ""
+            if path:
+                info = applist.describe_app(path, allow_scan=False)
+                name = info.get("name") or ""
+                icon = applist.icon_data_url(path)
+            slots.append({"slot": slot, "name": name, "icon": icon})
+        return {"type": "apps", "slots": slots}
+
+    def push_apps(self) -> None:
+        """设置页改完栏位后调用：把新的名称/图标广播给已连的手机。"""
+        if self._loop is None or not self._loop.is_running():
+            return
+        frame = self._apps_frame()
+        for client in list(self._clients):
+            asyncio.run_coroutine_threadsafe(self._send_json(client, frame), self._loop)
+        logger.info("apps frame pushed to %d client(s)", len(self._clients))
+
+    def _warm_app_icons(self) -> None:
+        """后台把配置里四个栏位的图标导出一遍（首次会调一次 PowerShell）。"""
+        try:
+            paths = [str(p) for p in (self._config.get("apps") or {}).values() if p]
+            applist.ensure_icons(paths)
+            logger.info("app slot icons ready: %d", len(paths))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("warm app slot icons failed: %s", exc)
+
     # ------------------------------------------------------------------ 截屏
 
     async def _handle_screenshot(self, client: _Client) -> None:
@@ -396,9 +438,24 @@ class RemoteMicService:
 
     # ------------------------------------------------------------------ 生命周期
 
-    def _refresh_audio(self) -> None:
+    def refresh_audio(self) -> dict:
+        """设置页「重新探测声卡」调用：重开输出流并返回当前状态。
+
+        会重新查一遍设备清单（`sounddevice` 每次 start 都现查），所以插了新的
+        虚拟声卡、改过 `audio_device_keyword` 之后点一下就生效，不用重启服务。
+        注意：没有匹配到设备时语音会整体禁用，**不会回落到物理扬声器**。
+        """
         self._audio.stop()
         self._audio.start()
+        logger.info("audio re-probed: ready=%s device=%s", self._audio.ready, self._audio.matched_device)
+        return self.audio_status()
+
+    def audio_status(self) -> dict:
+        return {
+            "ready": bool(self._audio.ready),
+            "device": self._audio.matched_device,
+            "keyword": str(self._config.get("audio_device_keyword", "CABLE Input")),
+        }
 
     def _request_settings(self) -> None:
         """托盘线程里只投递请求；真正的窗口在主线程打开（pywebview 要求）。"""
@@ -441,11 +498,11 @@ class RemoteMicService:
         self._audio.start()
         # 后台预热应用列表缓存：设置页打开时要立刻渲染，不能现场枚举（会白屏 1~2 秒）
         applist.warm_cache_async()
+        threading.Thread(target=self._warm_app_icons, daemon=True, name="slot-icons").start()
         self._settings_queue = queue.Queue()
         self._stopping = threading.Event()
         self._tray = Tray(
             on_quit=self.stop,
-            on_refresh_audio=self._refresh_audio,
             on_open_settings=self._request_settings,
             on_switch_remote=self.switch_active,
         )

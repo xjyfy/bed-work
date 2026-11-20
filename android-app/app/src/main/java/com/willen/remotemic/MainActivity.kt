@@ -84,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         loadDevices()
         ensurePermissions()
         bindButtons()
+        applyAppSlotsFromPrefs()   // 先用上次缓存的图标/名称垫上，连上后再刷新
         updateVoiceButton()
         renderHeader()
 
@@ -208,6 +209,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 "screenshot" -> onScreenshot(obj)
+                "apps" -> onAppsFrame(obj)
             }
         }
 
@@ -529,6 +531,80 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }.start()
+    }
+
+    // ------------------------------------------------------------------ 快捷应用图标
+
+    private fun appButton(index: Int): com.google.android.material.button.MaterialButton = when (index) {
+        1 -> binding.appBtn1
+        2 -> binding.appBtn2
+        3 -> binding.appBtn3
+        else -> binding.appBtn4
+    }
+
+    /**
+     * 电脑端推来的四个栏位（名称 + 图标 data URL）。
+     *
+     * 存进本地 prefs，下次冷启动没连上电脑也能先显示上次的图标/名称；
+     * 图标是 16~32px 的小 PNG，base64 一两 KB，直接放 prefs 没有压力。
+     */
+    private fun onAppsFrame(obj: JSONObject) {
+        val slots = obj.optJSONArray("slots") ?: return
+        val cache = JSONArray()
+        for (i in 0 until slots.length()) {
+            val item = slots.optJSONObject(i) ?: continue
+            val index = item.optString("slot", "").toIntOrNull() ?: continue
+            if (index !in 1..4) continue
+            val name = item.optString("name", "")
+            val icon = item.optString("icon", "")
+            applyAppButton(index, name, icon)
+            cache.put(JSONObject().put("slot", index).put("name", name).put("icon", icon))
+        }
+        prefs.edit().putString("app_slots", cache.toString()).apply()
+    }
+
+    private fun applyAppSlotsFromPrefs() {
+        val raw = prefs.getString("app_slots", "") ?: return
+        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val index = item.optInt("slot", 0)
+            if (index !in 1..4) continue
+            applyAppButton(index, item.optString("name", ""), item.optString("icon", ""))
+        }
+    }
+
+    private fun applyAppButton(index: Int, name: String, iconDataUrl: String) {
+        val button = appButton(index)
+        button.text = name.ifBlank { "应用$index" }
+        button.textSize = 12f
+        button.maxLines = 1
+        button.ellipsize = android.text.TextUtils.TruncateAt.END
+        val bitmap = decodeDataUrlIcon(iconDataUrl)
+        if (bitmap == null) {
+            button.icon = null
+            return
+        }
+        val density = resources.displayMetrics.density
+        button.icon = android.graphics.drawable.BitmapDrawable(resources, bitmap)
+        // MaterialButton 默认会把图标按主题色染色，应用图标就变成一团色块；
+        // 这里必须把 iconTint 清成 null，才显示原色图标。
+        @Suppress("UsePropertyAccessSyntax")
+        button.iconTint = null
+        button.iconGravity = com.google.android.material.button.MaterialButton.ICON_GRAVITY_TEXT_START
+        button.iconSize = (22 * density).toInt()
+        button.iconPadding = (6 * density).toInt()
+    }
+
+    private fun decodeDataUrlIcon(dataUrl: String): android.graphics.Bitmap? {
+        if (!dataUrl.startsWith("data:image/")) return null
+        val comma = dataUrl.indexOf(',')
+        if (comma <= 0) return null
+        val payload = dataUrl.substring(comma + 1)
+        return runCatching {
+            val bytes = android.util.Base64.decode(payload, android.util.Base64.DEFAULT)
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }.getOrNull()
     }
 
     // ------------------------------------------------------------------ 语音

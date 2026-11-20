@@ -155,6 +155,18 @@ tbody tr.sel { background:#cfe6ff !important; }
 </div>
 
 <div class="card">
+  <h2>音频输出（虚拟声卡）</h2>
+  <div class="grid2">
+    <label>当前设备</label><div id="audioDevice" class="hint">读取中…</div>
+    <label>匹配关键字</label><div id="audioKeyword" class="hint">—</div>
+  </div>
+  <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
+    <button onclick="refreshAudio(this)">重新探测声卡</button>
+    <span class="hint">手机语音从虚拟声卡进电脑；插拔过声卡、改了关键字或忽然没声音时点这里重开一次输出流</span>
+  </div>
+</div>
+
+<div class="card">
   <h2>已绑定遥控器</h2>
   <table>
     <thead><tr><th style="width:34%">名称</th><th style="width:22%">上次 IP</th><th style="width:20%">绑定时间</th><th style="width:14%">状态</th><th></th></tr></thead>
@@ -247,6 +259,7 @@ async function boot() {
   document.getElementById('addrline').textContent = `${state.ip}:${state.port}`;
   renderRemotes();
   renderSlots();
+  renderAudio();
   loadIcons();          // 图标异步补，不挡首屏
 }
 
@@ -294,6 +307,35 @@ function renderSlots() {
       <td><button onclick="openPicker('${esc(s.slot)}')" style="white-space:nowrap">选择应用</button></td>`;
     tb.appendChild(tr);
   });
+}
+
+function renderAudio() {
+  const a = state && state.audio;
+  const dev = document.getElementById('audioDevice');
+  const kw = document.getElementById('audioKeyword');
+  if (!a || !dev || !kw) return;
+  kw.textContent = a.keyword || '—';
+  if (a.ready) {
+    dev.innerHTML = `<span style="color:#1b7f3a">●</span> ${esc(a.device || '已就绪')}`;
+  } else {
+    dev.innerHTML = `<span style="color:#b3261e">○</span> 未就绪（没找到匹配设备，语音已禁用）`;
+  }
+}
+
+async function refreshAudio(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '探测中…'; }
+  try {
+    const res = await pywebview.api.refresh_audio();
+    state.audio = res;
+    renderAudio();
+    document.getElementById('subline').textContent = res.ready
+      ? `已重开声卡：${res.device}`
+      : `重新探测后仍未找到包含「${res.keyword}」的输出设备，语音已禁用`;
+  } catch (e) {
+    document.getElementById('subline').textContent = '探测失败：' + (e && e.message ? e.message : e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '重新探测声卡'; }
+  }
 }
 
 async function createBinding() {
@@ -474,7 +516,15 @@ class SettingsApi:
             "port": int(cfg.get("port", 8765)),
             "remotes": self._remotes(),
             "slots": self._slots(),
+            "audio": self._service.audio_status(),
         }
+
+    # ---------------------------------------------------------------- 音频
+
+    def refresh_audio(self) -> dict:
+        if hasattr(self._service, "refresh_audio"):
+            return self._service.refresh_audio()
+        return {"ready": False, "device": "", "keyword": ""}
 
     def list_apps(self) -> list[dict]:
         return applist.cached_entries()
@@ -528,6 +578,9 @@ class SettingsApi:
                 slot_hotkey.pop(slot, None)
         store.save_config(cfg)
         self._service.reload_config()
+        # 栏位应用可能变了，把新的名称/图标推给已连的手机
+        if hasattr(self._service, "push_apps"):
+            self._service.push_apps()
         logger.info("settings saved: %s", cfg.get("slot_send_hotkey"))
         return {
             "state": self.get_state(),
