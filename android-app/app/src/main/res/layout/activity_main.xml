@@ -182,19 +182,18 @@
                 android:text="传文件" />
         </LinearLayout>
 
-        <!-- ========== 方向区：九宫格（中心是视频播放/暂停）+ 右侧竖排滚轮 ========== -->
+        <!-- ========== 方向区：九宫格（中心视频键、右下确定）+ 右侧竖排滚轮，整组水平居中 ========== -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:layout_marginBottom="6dp"
-            android:gravity="center_vertical"
+            android:gravity="center_horizontal"
             android:orientation="horizontal">
 
             <GridLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="24dp"
                 android:columnCount="3"
                 android:horizontalGap="10dp"
                 android:rowCount="3"
@@ -254,36 +253,40 @@
                     android:layout_height="64dp"
                     android:text="▼" />
 
-                <View
+                <!-- 确定回到方向区，占九宫格右下（与左下的「取消」对称） -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnOk"
+                    style="@style/Widget.RemoteMic.Round"
                     android:layout_width="64dp"
-                    android:layout_height="64dp" />
+                    android:layout_height="64dp"
+                    android:text="确定" />
             </GridLayout>
 
             <LinearLayout
-                android:layout_width="0dp"
+                android:layout_width="96dp"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:gravity="end|center_vertical"
+                android:layout_marginStart="12dp"
+                android:gravity="center_vertical"
                 android:orientation="vertical">
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnScrollPrev"
                     style="@style/Widget.RemoteMic.Key"
-                    android:layout_width="96dp"
+                    android:layout_width="match_parent"
                     android:layout_height="64dp"
                     android:text="滚轮↑" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnScrollNext"
                     style="@style/Widget.RemoteMic.Key"
-                    android:layout_width="96dp"
+                    android:layout_width="match_parent"
                     android:layout_height="64dp"
                     android:layout_marginTop="14dp"
                     android:text="滚轮↓" />
             </LinearLayout>
         </LinearLayout>
 
-        <!-- ========== 编辑/窗口行：退格 · 确定 · 切换应用 · 切换 Tab ========== -->
+        <!-- ========== 窗口/编辑行：切换应用 · 切换 Tab · 退格（最右） ========== -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -291,34 +294,14 @@
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnDelete"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_weight="1"
-                android:maxLines="1"
-                android:text="退格"
-                android:textSize="12sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnOk"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="确定" />
-
-            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnSwitcher"
                 style="@style/Widget.RemoteMic.Key"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
-                android:layout_marginStart="8dp"
                 android:layout_weight="1"
                 android:maxLines="1"
                 android:text="切换应用"
-                android:textSize="12sp" />
+                android:textSize="13sp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnTabSwitch"
@@ -329,8 +312,28 @@
                 android:layout_weight="1"
                 android:maxLines="1"
                 android:text="切换 Tab"
-                android:textSize="12sp" />
+                android:textSize="13sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDelete"
+                style="@style/Widget.RemoteMic.Key"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:text="退格"
+                android:textSize="13sp" />
         </LinearLayout>
+
+        <!-- 弹簧：视口还有余量时把下面「语音区 + 快捷区」压到更靠底部的位置；
+             内容超过一屏时高度归零，不影响滚动 -->
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:minHeight="12dp"
+            android:layout_weight="1" />
+
 
         <!-- ========== 语音区：新会话 / 按住说话 / 发送 ========== -->
         <LinearLayout
