@@ -35,6 +35,24 @@
         <item name="android:insetBottom">0dp</item>
     </style>
 
+    <!-- 桌面式应用图标键：透明底、图标在上、文字在下（模仿手机桌面图标） -->
+    <style name="Widget.RemoteMic.AppIcon" parent="Widget.Material3.Button.TextButton">
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/on_surface</item>
+        <item name="android:insetLeft">0dp</item>
+        <item name="android:insetRight">0dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:paddingLeft">2dp</item>
+        <item name="android:paddingRight">2dp</item>
+        <item name="android:paddingTop">6dp</item>
+        <item name="android:paddingBottom">4dp</item>
+        <item name="iconGravity">textTop</item>
+        <item name="iconPadding">6dp</item>
+        <item name="iconSize">52dp</item>
+        <item name="backgroundTint">@android:color/transparent</item>
+    </style>
+
     <!-- 方向圆盘的圆形按键 -->
     <style name="Widget.RemoteMic.Round" parent="Widget.RemoteMic.Key">
         <item name="cornerRadius">32dp</item>

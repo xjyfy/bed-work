@@ -275,6 +275,32 @@ def _run_pwsh(script: str) -> str:
     return ""
 
 
+def _run_ps1(script_path: str) -> str:
+    """跑一个 .ps1 文件（需要多行 C# 内联时用；-Command 拼长脚本容易踩引号）。"""
+    global _PWSH_CACHE
+    if not _PWSH_CACHE:
+        _PWSH_CACHE = _pwsh_candidates()
+    if not _PWSH_CACHE:
+        logger.warning("no PowerShell found, skip script run")
+        return ""
+    for exe in _PWSH_CACHE:
+        try:
+            out = subprocess.run(
+                [exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            if out.returncode == 0:
+                return (out.stdout or "").strip()
+            logger.warning("ps1 (%s) rc=%s stderr=%s", exe, out.returncode, (out.stderr or "")[:200])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ps1 (%s) failed: %s", exe, exc)
+    return ""
+
+
 def _start_menu_links() -> list[tuple[str, str]]:
     script = (
         "$sh = New-Object -ComObject WScript.Shell; $items = @();"
@@ -328,32 +354,148 @@ def icon_cache_dir() -> str:
 
 def _icon_path(exe: str) -> str:
     digest = hashlib.md5(exe.lower().encode("utf-8")).hexdigest()[:16]
-    return os.path.join(icon_cache_dir(), f"{digest}.png")
+    # 后缀带 _256：手机端要把图标当桌面图标那样放大显示，32px 会糊；
+    # 换名字也顺手把老的低清缓存作废（不会去读旧文件）
+    return os.path.join(icon_cache_dir(), f"{digest}_256.png")
+
+
+# 用 Windows Shell 的 IShellItemImageFactory 取 256px 大图标（ExtractAssociatedIcon
+# 只能给 32px，放大就糊）。拿不到再退回 32px 再放大兜底。
+_ICON_PS1 = r"""$OutputEncoding=[Text.Encoding]::UTF8;[Console]::OutputEncoding=[Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Drawing
+$src = @"
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+public static class JumboIcon {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE { public int cx; public int cy; public SIZE(int x, int y) { cx = x; cy = y; } }
+
+    [ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItemImageFactory {
+        [PreserveSig] int GetImage(SIZE size, int flags, out IntPtr phbm);
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    private static extern void SHCreateItemFromParsingName(
+        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+        IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFOHEADER {
+        public uint biSize; public int biWidth; public int biHeight;
+        public ushort biPlanes; public ushort biBitCount; public uint biCompression;
+        public uint biSizeImage; public int biXPelsPerMeter; public int biYPelsPerMeter;
+        public uint biClrUsed; public uint biClrImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; public uint bmiColors; }
+
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] private static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint lines,
+        byte[] bits, ref BITMAPINFO bmi, uint usage);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr hObject);
+
+    public static Bitmap Get(string path, int size) {
+        IShellItemImageFactory f = null;
+        IntPtr hbm = IntPtr.Zero, hdc = IntPtr.Zero;
+        try {
+            Guid iid = new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+            SHCreateItemFromParsingName(path, IntPtr.Zero, iid, out f);
+            int hr = f.GetImage(new SIZE(size, size), 0x1 | 0x4, out hbm);
+            if (hr != 0 || hbm == IntPtr.Zero) throw new Exception("GetImage hr=" + hr);
+
+            // 必须自己 GetDIBits 取 32bpp 原始位（含 alpha）。Image.FromHbitmap 会丢 alpha，
+            // 透明区直接变成不透明的黑块——手机上看就是四个黑方块。
+            BITMAPINFO bmi = new BITMAPINFO();
+            bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+            bmi.bmiHeader.biWidth = size;
+            bmi.bmiHeader.biHeight = -size;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = 0;
+
+            byte[] buf = new byte[size * size * 4];
+            hdc = CreateCompatibleDC(IntPtr.Zero);
+            int got = GetDIBits(hdc, hbm, 0, (uint)size, buf, ref bmi, 0);
+            if (got == 0) throw new Exception("GetDIBits failed");
+
+            int maxA = 0;
+            for (int i = 3; i < buf.Length; i += 4) { if (buf[i] > maxA) maxA = buf[i]; }
+            if (maxA == 0) {
+                // 万一 shell 给的是 24bpp 语义，纯黑当透明兜底
+                for (int i = 0; i < buf.Length; i += 4) {
+                    if (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 0) buf[i + 3] = 0;
+                }
+            }
+
+            Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            BitmapData bd = bmp.LockBits(new Rectangle(0, 0, size, size), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            Marshal.Copy(buf, 0, bd.Scan0, buf.Length);
+            bmp.UnlockBits(bd);
+            return bmp;
+        } finally {
+            if (hdc != IntPtr.Zero) DeleteDC(hdc);
+            if (hbm != IntPtr.Zero) DeleteObject(hbm);
+            if (f != null) Marshal.ReleaseComObject(f);
+        }
+    }
+}
+"@
+$sdc = @([System.Drawing.Bitmap].Assembly.Location, [System.Drawing.Rectangle].Assembly.Location)
+try { Add-Type -TypeDefinition $src -ReferencedAssemblies $sdc -ErrorAction Stop } catch { }
+
+$pairs = Get-Content -LiteralPath '__JSON__' -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($p in $pairs.pairs) {
+    $dest = $p[1]
+    try {
+        $img = [JumboIcon]::Get($p[0], 256)
+        if ($img -ne $null) {
+            $img.Save($dest, [System.Drawing.Imaging.ImageFormat]::Png)
+            $img.Dispose()
+            continue
+        }
+    } catch { }
+    try {
+        $i = [System.Drawing.Icon]::ExtractAssociatedIcon($p[0])
+        if ($i) {
+            $b = $i.ToBitmap()
+            if ($b.Width -lt 256) { $big = New-Object System.Drawing.Bitmap($b, 256, 256); $b.Dispose(); $b = $big }
+            $b.Save($dest, [System.Drawing.Imaging.ImageFormat]::Png)
+            $b.Dispose()
+        }
+    } catch { }
+}
+"""
 
 
 def ensure_icons(exes: list[str]) -> None:
-    """批量把 exe 关联图标导出为 png（有缓存则跳过）。"""
+    """批量把 exe 关联图标导出为 256px PNG（有缓存则跳过）。"""
     todo = [e for e in exes if e and not e.startswith("uwp:") and os.path.exists(e) and not os.path.exists(_icon_path(e))]
     if not todo:
         return
     payload = {"pairs": [[e, _icon_path(e)] for e in todo]}
-    tmp_json = os.path.join(icon_cache_dir(), "_icons_request.json")
+    work_dir = icon_cache_dir()
+    tmp_json = os.path.join(work_dir, "_icons_request.json")
     with open(tmp_json, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False)
 
-    script = (
-        "$d = Get-Content -LiteralPath '%s' -Raw -Encoding UTF8 | ConvertFrom-Json;"
-        "Add-Type -AssemblyName System.Drawing;"
-        "foreach ($p in $d.pairs) { try {"
-        " $i = [System.Drawing.Icon]::ExtractAssociatedIcon($p[0]);"
-        " if ($i) { $b = $i.ToBitmap(); $b.Save($p[1], [System.Drawing.Imaging.ImageFormat]::Png); $b.Dispose() }"
-        " } catch {} }"
-    ) % tmp_json.replace("'", "''")
-    _run_pwsh(script)
-    try:
-        os.remove(tmp_json)
-    except OSError:
-        pass
+    script_path = os.path.join(work_dir, "_icons_export.ps1")
+    with open(script_path, "w", encoding="utf-8-sig") as fh:
+        fh.write(_ICON_PS1.replace("__JSON__", tmp_json.replace("'", "''")))
+
+    _run_ps1(script_path)
+    for path in (tmp_json, script_path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _uwp_icon_path(aumid: str) -> str:

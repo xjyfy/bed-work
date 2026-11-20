@@ -335,6 +335,10 @@ class RemoteMicService:
         """
         cfg = self._config
         apps = cfg.get("apps") or {}
+        if not applist.peek_entries():
+            # 缓存还没预热好：现在只能退化成 exe 文件名，先把枚举放到后台跑，
+            # 预热完成后 _warm_app_icons 会再推一帧带正确名称/图标的
+            applist.warm_cache_async()
         slots = []
         for slot in ("1", "2", "3", "4"):
             path = str(apps.get(slot) or "")
@@ -357,13 +361,24 @@ class RemoteMicService:
         logger.info("apps frame pushed to %d client(s)", len(self._clients))
 
     def _warm_app_icons(self) -> None:
-        """后台把配置里四个栏位的图标导出一遍（首次会调一次 PowerShell）。"""
+        """后台把配置里四个栏位的图标导出一遍（首次会调一次 PowerShell）。
+
+        顺手把整个应用表缓存也预热掉并重推一次 apps 帧：手机如果在这之前就
+        连上了，收到的名称会是 exe 文件名（Weixin / chrome），预热完成后再补一帧
+        就变成「微信 / 豆包 / Google Chrome」。
+        """
         try:
             paths = [str(p) for p in (self._config.get("apps") or {}).values() if p]
             applist.ensure_icons(paths)
             logger.info("app slot icons ready: %d", len(paths))
         except Exception as exc:  # noqa: BLE001
             logger.warning("warm app slot icons failed: %s", exc)
+
+        try:
+            applist.cached_entries()
+            self.push_apps()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("push apps after warm failed: %s", exc)
 
     # ------------------------------------------------------------------ 截屏
 

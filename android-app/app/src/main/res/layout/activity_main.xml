@@ -306,35 +306,36 @@
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/appBtn1"
-                style="@style/Widget.RemoteMic.Key"
+                style="@style/Widget.RemoteMic.AppIcon"
                 android:layout_width="0dp"
-                android:layout_height="48dp"
+                android:layout_height="96dp"
                 android:layout_columnWeight="1"
                 android:text="应用1" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/appBtn2"
-                style="@style/Widget.RemoteMic.Key"
+                style="@style/Widget.RemoteMic.AppIcon"
                 android:layout_width="0dp"
-                android:layout_height="48dp"
+                android:layout_height="96dp"
                 android:layout_columnWeight="1"
                 android:text="应用2" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/appBtn3"
-                style="@style/Widget.RemoteMic.Key"
+                style="@style/Widget.RemoteMic.AppIcon"
                 android:layout_width="0dp"
-                android:layout_height="48dp"
+                android:layout_height="96dp"
                 android:layout_columnWeight="1"
                 android:text="应用3" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/appBtn4"
-                style="@style/Widget.RemoteMic.Key"
+                style="@style/Widget.RemoteMic.AppIcon"
                 android:layout_width="0dp"
-                android:layout_height="48dp"
+                android:layout_height="96dp"
                 android:layout_columnWeight="1"
                 android:text="应用4" />
         </GridLayout>
     </LinearLayout>
 </ScrollView>
+

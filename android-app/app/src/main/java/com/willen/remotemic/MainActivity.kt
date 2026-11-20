@@ -577,7 +577,7 @@ class MainActivity : AppCompatActivity() {
     private fun applyAppButton(index: Int, name: String, iconDataUrl: String) {
         val button = appButton(index)
         button.text = name.ifBlank { "应用$index" }
-        button.textSize = 12f
+        button.textSize = 11f
         button.maxLines = 1
         button.ellipsize = android.text.TextUtils.TruncateAt.END
         val bitmap = decodeDataUrlIcon(iconDataUrl)
@@ -591,9 +591,11 @@ class MainActivity : AppCompatActivity() {
         // 这里必须把 iconTint 清成 null，才显示原色图标。
         @Suppress("UsePropertyAccessSyntax")
         button.iconTint = null
-        button.iconGravity = com.google.android.material.button.MaterialButton.ICON_GRAVITY_TEXT_START
-        button.iconSize = (22 * density).toInt()
+        // 模仿桌面图标：图标在上、文字在下，按钮本身透明不画底色
+        button.iconGravity = com.google.android.material.button.MaterialButton.ICON_GRAVITY_TEXT_TOP
+        button.iconSize = (52 * density).toInt()
         button.iconPadding = (6 * density).toInt()
+        button.backgroundTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.TRANSPARENT)
     }
 
     private fun decodeDataUrlIcon(dataUrl: String): android.graphics.Bitmap? {
