@@ -18,10 +18,20 @@ from . import paths
 
 logger = logging.getLogger(__name__)
 
-# pnputil 里的原始 INF 名（实测本机为 vbaudio_cable64_audio.inf / vbMmeCable64_audio.inf）
-DRIVER_KEYWORDS = ("vbaudio_cable64", "vbmme_cable64", "vbcable")
+# pnputil 输出里能出现的关键字（大小写不敏感，按小写匹配）。
+# 2026-11-20 修正：实测本机 INF 原始名是 `vbmmecable64_win10.inf`（mme 与 cable 之间**没有**下划线），
+# 旧列表写成 "vbmme_cable64" 永远匹配不上，导致已装驱动被判定为"未装"，
+# 安装包在 ssPostInstall 又跑一遍安装器，最后弹出"VB-CABLE 虚拟声卡未装好"的误报。
+# 现在同时匹配 INF 名与 Provider Name（"VB-Audio Software"），任一条命中即视为已装。
+DRIVER_KEYWORDS = ("vbmmecable", "vbaudiocable", "vbcable", "vb-audio", "vb_audio")
 INSTALLER_NAMES = ("VBCABLE_Setup_x64.exe", "VBCABLE_Setup.exe")
 CREATE_NO_WINDOW = 0x08000000
+
+# PowerShell 绝对路径优先：隐藏启动（计划任务/安装器子进程）时 PATH 可能只指向受限运行时
+_PS_CANDIDATES = (
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "powershell.exe",
+)
 
 _cache: Optional[tuple[float, bool]] = None
 _CACHE_TTL = 5.0
@@ -44,20 +54,30 @@ def _run(cmd: list[str], timeout: float = 12.0) -> str:
 
 
 def detect_installed(force: bool = False) -> bool:
-    """驱动节点是否存在（不依赖"名字里带 CABLE"，避免误判主板自带设备）。"""
+    """驱动是否存在：pnputil（INF 名 / Provider 名）→ 设备管理器兜底。
+
+    打包后也要走兜底：安装器的 OpenProcess 子进程里 pnputil 偶发拿不到完整输出，
+    只靠 INF 名会把已装驱动判成未装（2026-11-20 真机踩坑）。
+    """
     global _cache
     if not force and _cache is not None and time.time() - _cache[0] < _CACHE_TTL:
         return _cache[1]
 
-    found = any(k in _run(["pnputil", "/enum-drivers"]).lower() for k in DRIVER_KEYWORDS)
-    if not found and paths.is_frozen() is False:
-        # pnputil 偶发不可用时用设备管理器兜底（打包后同样可用，只是慢一点）
-        count = _run([
-            "powershell", "-NoProfile", "-NonInteractive", "-Command",
-            "@(Get-PnpDevice -ErrorAction SilentlyContinue | "
-            "Where-Object { $_.FriendlyName -match 'VB-Audio' -and $_.Status -eq 'OK' }).Count",
-        ], timeout=20).strip()
-        found = count.isdigit() and int(count) > 0
+    out = _run(["pnputil", "/enum-drivers"]).lower()
+    found = any(k in out for k in DRIVER_KEYWORDS)
+
+    if not found:
+        # 设备管理器兜底（打包后同样可用，只是慢一点）。用绝对路径 powershell，
+        # 避免隐藏启动时 PATH 指向受限运行时导致静默降级。
+        for ps in _PS_CANDIDATES:
+            count = _run([
+                ps, "-NoProfile", "-NonInteractive", "-Command",
+                "@(Get-PnpDevice -ErrorAction SilentlyContinue | "
+                "Where-Object { $_.FriendlyName -match 'VB-Audio|CABLE' -and $_.Status -eq 'OK' }).Count",
+            ], timeout=20).strip()
+            if count.isdigit():
+                found = int(count) > 0
+                break
 
     _cache = (time.time(), found)
     return found
