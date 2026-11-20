@@ -7,7 +7,7 @@
   - 修法：所有外部命令调用统一加 `creationflags=CREATE_NO_WINDOW`（`applist._run_pwsh` / `_run_ps1`、`settings_ui._run_pwsh`、`actioner` 的 `shell=True` 启动），`driver.py` 原本就有。输出仍通过管道读回，功能不变。
 - **覆盖安装弹「安装程序无法自动关闭所有应用程序 / 选择操作」**
   - 原因：托盘进程只有一个 `pystray` 的隐藏消息窗口，Windows Restart Manager 给它发关闭消息后它不会退出主循环，Inno 的 `CloseApplications=yes` 因此判定"关不掉"，只能弹框让用户点「重试 / 忽略 / 取消」——而点哪个都不能顺利装完（文件仍被占用）。
-  - 修法：`[Code]` 新增 `PrepareToInstall`，进入安装流程前先 `taskkill /IM RemoteMicService.exe /F /T`，再用 `taskkill /FI` 轮询确认进程确实退出（最多等 3 秒），然后才开始拷贝文件。装完由 `[Run]` 重新拉起服务，`HKCU\...\Run` 自启项不受影响。
+  - 修法：`[Code]` 新增 `PrepareToInstall`，进入安装流程前先 `taskkill /IM RemoteMicService.exe /F /T`，再等 900 ms 让 exe 文件句柄释放，然后才开始拷贝文件。装完由 `[Run]` 重新拉起服务，`HKCU\...\Run` 自启项不受影响。
   - 效果：以后覆盖安装**不需要**再手动右键托盘「退出」，也不会再弹这个框。
 
 ## 说明
@@ -17,6 +17,7 @@
 - 杀进程会让服务断一下，装完由 `[Run]`「立即启动」和 `HKCU\...\Run` 自启项接回来；运行期数据（`%LOCALAPPDATA%\RemoteMic` 的 token、四栏位、日志）不动。
 - 曾试过用 `taskkill /FI ... /NH` 的返回码做"进程是否已退"的轮询，实测**无匹配也返回 1**、与有匹配无法区分，故改为 `/F` 强杀后固定等 900 ms 释放句柄。
 
-## 未做
+## 未做 / 不在本版
 
-- 未推送到 GitHub（按要求仅更新本地仓）。
+- 安装包与主程序仍未签名（v1.0.1 的自签方案已按需求撤掉），SmartScreen 首次运行会提示「未知发布者」，属预期。
+- 本版只有 **Windows 电脑端**（服务 + 安装器）改动；手机端 UI 改版（九宫格/语音区等布局调整）走单独构建的 APK，不打进这个安装包。
