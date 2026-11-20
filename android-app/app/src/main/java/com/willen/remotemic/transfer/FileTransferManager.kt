@@ -67,7 +67,7 @@ class FileTransferManager(
 
     fun isBusy(): Boolean = sendThread?.isAlive == true || receive != null
 
-    /** 用户点了「传照片/视频」或「传文件」后拿到 URI 列表，从这里开始发。 */
+    /** 用户点了「传照片」或「传文件」后拿到 URI 列表，从这里开始发。 */
     fun sendUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         if (!allowed) {
