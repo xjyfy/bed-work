@@ -18,9 +18,15 @@
 ;        失败只做提示，绝不让整个安装失败（netsh 删除不存在规则本来就会返回 1，同理）。
 ;   3. 卸载时驱动卸载挪到 usUninstall —— 原在 usPostUninstall，那时 {app} 里的 VBCABLE_Setup 已被删掉，
 ;      FileExists 恒假，驱动永远卸不掉。
+;
+; 2026-11-20 修复（覆盖安装弹"安装程序无法自动关闭所有应用程序"）：
+;   托盘进程只有一个 pystray 的隐藏消息窗口，收到 Restart Manager 的关闭消息不会退出主循环，
+;   CloseApplications=yes 判定"关不掉"，于是弹框让用户二选一，装不下去。
+;   → 在 [Code].PrepareToInstall 里先 taskkill /IM RemoteMicService.exe /F /T，再轮询确认进程已退，
+;     装完后由 [Run] 重新拉起（自启项不变）。用户不再需要手动退托盘。
 
 #define AppName "手机遥控麦"
-#define AppVersion "1.0.2"
+#define AppVersion "1.0.3"
 #define AppExe "RemoteMicService.exe"
 
 [Setup]
@@ -77,6 +83,19 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 [Code]
 const
   WebView2Guid = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+
+{ 覆盖安装前自己把托盘进程杀掉：它只有隐藏窗口，Restart Manager 关不掉，否则必弹"选择操作"。
+  注意 taskkill /FI 查询模式的返回码不可靠（无匹配也返回 1），所以不用它判断存活，
+  改为 /F 强杀后固定等一会儿，让文件句柄真正释放。 }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  NeedsRestart := False;
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#AppExe} /F /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(900);
+end;
 
 { ---------------- 检测 ---------------- }
 
