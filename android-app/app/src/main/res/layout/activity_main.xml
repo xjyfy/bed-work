@@ -13,8 +13,7 @@
         android:paddingTop="20dp"
         android:paddingBottom="16dp">
 
-        <!-- 顶栏：状态（左） / 设备名（正中） / 设置（右）。
-             用 FrameLayout 才能让设备名真正居中，不等宽的两端不会把它拽偏。 -->
+        <!-- 顶栏：状态（左） / 设备名（正中） / 设置（右）。 -->
         <FrameLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -182,148 +181,130 @@
                 android:text="传文件" />
         </LinearLayout>
 
-        <!-- ========== 方向区：九宫格（中心视频键、右下确定）+ 右侧竖排滚轮，整组水平居中 ========== -->
+        <!-- ========== 方向区（整体水平居中）：
+             上排 = 九宫格（中心视频键）+ 右侧竖排滚轮（在区内垂直居中）
+             下排 = 取消 / 确定，位于方向键下方，不再挤在九宫格里 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:layout_marginBottom="6dp"
             android:gravity="center_horizontal"
-            android:orientation="horizontal">
+            android:orientation="vertical">
 
-            <GridLayout
+            <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:columnCount="3"
-                android:horizontalGap="10dp"
-                android:rowCount="3"
-                android:verticalGap="10dp">
+                android:orientation="horizontal">
 
-                <View
-                    android:layout_width="64dp"
-                    android:layout_height="64dp" />
+                <GridLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:columnCount="3"
+                    android:horizontalGap="10dp"
+                    android:rowCount="3"
+                    android:verticalGap="10dp">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnUp"
-                    style="@style/Widget.RemoteMic.Round"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
-                    android:text="▲" />
+                    <View
+                        android:layout_width="64dp"
+                        android:layout_height="64dp" />
 
-                <View
-                    android:layout_width="64dp"
-                    android:layout_height="64dp" />
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnUp"
+                        style="@style/Widget.RemoteMic.Round"
+                        android:layout_width="64dp"
+                        android:layout_height="64dp"
+                        android:text="▲" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnLeft"
-                    style="@style/Widget.RemoteMic.Round"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
-                    android:text="◀" />
+                    <View
+                        android:layout_width="64dp"
+                        android:layout_height="64dp" />
 
-                <!-- 中间原来是「确定」，现在是视频播放/暂停 -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnVideoPlayPause"
-                    style="@style/Widget.RemoteMic.Round"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
-                    android:lineSpacingExtra="-2dp"
-                    android:maxLines="2"
-                    android:text="视频\n播放暂停"
-                    android:textSize="11sp" />
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnLeft"
+                        style="@style/Widget.RemoteMic.Round"
+                        android:layout_width="64dp"
+                        android:layout_height="64dp"
+                        android:text="◀" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnRight"
-                    style="@style/Widget.RemoteMic.Round"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
-                    android:text="▶" />
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnVideoPlayPause"
+                        style="@style/Widget.RemoteMic.Round"
+                        android:layout_width="64dp"
+                        android:layout_height="64dp"
+                        android:lineSpacingExtra="-2dp"
+                        android:maxLines="2"
+                        android:text="视频\n播放暂停"
+                        android:textSize="11sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnRight"
+                        style="@style/Widget.RemoteMic.Round"
+                        android:layout_width="64dp"
+                        android:layout_height="64dp"
+                        android:text="▶" />
+
+                    <View
+                        android:layout_width="64dp"
+                        android:layout_height="64dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnDown"
+                        style="@style/Widget.RemoteMic.Round"
+                        android:layout_width="64dp"
+                        android:layout_height="64dp"
+                        android:text="▼" />
+
+                    <View
+                        android:layout_width="64dp"
+                        android:layout_height="64dp" />
+                </GridLayout>
+
+                <LinearLayout
+                    android:layout_width="96dp"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_vertical"
+                    android:layout_marginStart="12dp"
+                    android:orientation="vertical">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnScrollPrev"
+                        style="@style/Widget.RemoteMic.Key"
+                        android:layout_width="match_parent"
+                        android:layout_height="64dp"
+                        android:text="滚轮↑" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnScrollNext"
+                        style="@style/Widget.RemoteMic.Key"
+                        android:layout_width="match_parent"
+                        android:layout_height="64dp"
+                        android:layout_marginTop="14dp"
+                        android:text="滚轮↓" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnCancel"
-                    style="@style/Widget.RemoteMic.Round"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
+                    style="@style/Widget.RemoteMic.Key"
+                    android:layout_width="96dp"
+                    android:layout_height="48dp"
                     android:text="取消" />
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnDown"
-                    style="@style/Widget.RemoteMic.Round"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
-                    android:text="▼" />
-
-                <!-- 确定回到方向区，占九宫格右下（与左下的「取消」对称） -->
-                <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnOk"
-                    style="@style/Widget.RemoteMic.Round"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
+                    style="@style/Widget.RemoteMic.Key"
+                    android:layout_width="96dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="12dp"
                     android:text="确定" />
-            </GridLayout>
-
-            <LinearLayout
-                android:layout_width="96dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
-                android:gravity="center_vertical"
-                android:orientation="vertical">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnScrollPrev"
-                    style="@style/Widget.RemoteMic.Key"
-                    android:layout_width="match_parent"
-                    android:layout_height="64dp"
-                    android:text="滚轮↑" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnScrollNext"
-                    style="@style/Widget.RemoteMic.Key"
-                    android:layout_width="match_parent"
-                    android:layout_height="64dp"
-                    android:layout_marginTop="14dp"
-                    android:text="滚轮↓" />
             </LinearLayout>
-        </LinearLayout>
-
-        <!-- ========== 窗口/编辑行：切换应用 · 切换 Tab · 退格（最右） ========== -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:orientation="horizontal">
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnSwitcher"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_weight="1"
-                android:maxLines="1"
-                android:text="切换应用"
-                android:textSize="13sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnTabSwitch"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:maxLines="1"
-                android:text="切换 Tab"
-                android:textSize="13sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnDelete"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:maxLines="1"
-                android:text="退格"
-                android:textSize="13sp" />
         </LinearLayout>
 
         <!-- 弹簧：视口还有余量时把下面「语音区 + 快捷区」压到更靠底部的位置；
@@ -331,44 +312,88 @@
         <Space
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:minHeight="12dp"
-            android:layout_weight="1" />
+            android:layout_weight="1"
+            android:minHeight="12dp" />
 
-
-        <!-- ========== 语音区：新会话 / 按住说话 / 发送 ========== -->
+        <!-- ========== 语音区：切换应用 / 切换 Tab / 退格 + 新会话 / 按住说话 / 发送 ========== -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:baselineAligned="false"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:layout_marginTop="4dp"
+            android:orientation="vertical">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnNewChat"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="72dp"
-                android:layout_weight="1"
-                android:text="新会话" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnVoice"
-                android:layout_width="0dp"
-                android:layout_height="72dp"
-                android:layout_marginStart="8dp"
-                android:layout_weight="2.4"
-                android:text="按住说话·双击常开"
-                android:textSize="13sp" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSwitcher"
+                    style="@style/Widget.RemoteMic.Key"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:maxLines="1"
+                    android:text="切换应用"
+                    android:textSize="13sp" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnSend"
-                style="@style/Widget.RemoteMic.Key"
-                android:layout_width="0dp"
-                android:layout_height="72dp"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="发送" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnTabSwitch"
+                    style="@style/Widget.RemoteMic.Key"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:maxLines="1"
+                    android:text="切换 Tab"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDelete"
+                    style="@style/Widget.RemoteMic.Key"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:maxLines="1"
+                    android:text="退格"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:baselineAligned="false"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnNewChat"
+                    style="@style/Widget.RemoteMic.Key"
+                    android:layout_width="0dp"
+                    android:layout_height="72dp"
+                    android:layout_weight="1"
+                    android:text="新会话" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnVoice"
+                    android:layout_width="0dp"
+                    android:layout_height="72dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="2.4"
+                    android:text="按住说话·双击常开"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSend"
+                    style="@style/Widget.RemoteMic.Key"
+                    android:layout_width="0dp"
+                    android:layout_height="72dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="发送" />
+            </LinearLayout>
         </LinearLayout>
 
         <!-- ========== 快捷区：四个应用切换键 ========== -->
