@@ -37,6 +37,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var client: RemoteWsClient
+    private lateinit var screenReceiver: android.content.BroadcastReceiver
+    private var firstResume = true
 
     private val devices = mutableListOf<Device>()
     private var current: Device? = null
@@ -91,6 +93,25 @@ class MainActivity : AppCompatActivity() {
         } else {
             showBindingDialog()
         }
+        registerScreenReceiver()
+    }
+
+    /**
+     * 亮屏 / 解锁时立刻校验连接：熄屏后系统会挂起网络，socket 多半已死，
+     * 但用户不希望在后台常驻（费电 + 通知栏），所以不做保活，改成「亮屏即重连」。
+     */
+    private fun registerScreenReceiver() {
+        val filter = android.content.IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        screenReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: Intent?) {
+                android.util.Log.i("MainActivity", "screen event: ${intent?.action} -> wakeUp")
+                client.wakeUp()
+            }
+        }
+        registerReceiver(screenReceiver, filter)
     }
 
     // ------------------------------------------------------------------ 权限
@@ -517,9 +538,19 @@ class MainActivity : AppCompatActivity() {
         binding.btnScrollPrev.click { send("key", "code" to "scroll_prev", "action" to "down") }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (firstResume) {
+            firstResume = false          // 首次进入不打扰正在建立的首连
+        } else if (!connected) {
+            client.wakeUp()
+        }
+    }
+
     override fun onDestroy() {
         cancelPendingVoiceStop()
         AudioBus.onPcm = null
+        runCatching { unregisterReceiver(screenReceiver) }
         client.close()
         super.onDestroy()
     }
