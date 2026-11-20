@@ -11,12 +11,15 @@ android {
         applicationId = "com.willen.remotemic"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
     }
 
     buildTypes {
         release {
+            // 自用发布：沿用本机 debug 签名，保证能直接覆盖已安装的开发版而不丢绑定。
+            // 要上架或对外分发时，换成独立 release keystore 后重新发版。
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

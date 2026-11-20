@@ -1,10 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.RemoteMic" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="colorPrimary">@color/primary</item>
-        <item name="colorPrimaryDark">@color/primary_dark</item>
-        <item name="android:colorBackground">@color/surface</item>
-        <item name="android:textColor">@color/on_surface</item>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.RemoteMic" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/accent</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/text</item>
+        <item name="colorOutline">@color/line</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="29">false</item>
+        <item name="android:fontFamily">sans-serif</item>
     </style>
 
     <!-- 扫码页：全屏、黑底，相机预览铺满 -->
@@ -38,23 +49,58 @@
     <!-- 桌面式应用图标键：透明底、图标在上、文字在下（模仿手机桌面图标） -->
     <style name="Widget.RemoteMic.AppIcon" parent="Widget.Material3.Button.TextButton">
         <item name="android:textSize">11sp</item>
-        <item name="android:textColor">@color/on_surface</item>
+        <item name="android:textColor">@color/muted</item>
         <item name="android:insetLeft">0dp</item>
         <item name="android:insetRight">0dp</item>
         <item name="android:insetTop">0dp</item>
         <item name="android:insetBottom">0dp</item>
         <item name="android:paddingLeft">2dp</item>
         <item name="android:paddingRight">2dp</item>
-        <item name="android:paddingTop">6dp</item>
-        <item name="android:paddingBottom">4dp</item>
+        <item name="android:paddingTop">4dp</item>
+        <item name="android:paddingBottom">2dp</item>
         <item name="iconGravity">textTop</item>
         <item name="iconPadding">6dp</item>
-        <item name="iconSize">52dp</item>
+        <item name="iconSize">54dp</item>
         <item name="backgroundTint">@android:color/transparent</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
     </style>
 
-    <!-- 方向圆盘的圆形按键 -->
-    <style name="Widget.RemoteMic.Round" parent="Widget.RemoteMic.Key">
-        <item name="cornerRadius">32dp</item>
+    <!-- 方向环中心：白色圆钮，图标在上、小字在下 -->
+    <style name="Widget.RemoteMic.CenterButton" parent="Widget.Material3.Button">
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/muted</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:insetLeft">0dp</item>
+        <item name="android:insetRight">0dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:padding">0dp</item>
+        <item name="android:elevation">8dp</item>
+        <item name="backgroundTint">@color/white</item>
+        <item name="cornerRadius">46dp</item>
+        <item name="strokeWidth">0dp</item>
+        <item name="rippleColor">@color/accent_wash</item>
+        <item name="iconGravity">textTop</item>
+        <item name="iconPadding">2dp</item>
+        <item name="iconSize">26dp</item>
+        <item name="iconTint">@color/text</item>
+    </style>
+
+    <!-- 键帽：Esc / Enter -->
+    <style name="Widget.RemoteMic.Keycap" parent="android:Widget.TextView">
+        <item name="android:background">@drawable/bg_keycap</item>
+        <item name="android:textSize">10sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/muted</item>
+        <item name="android:gravity">center</item>
+        <item name="android:minWidth">28dp</item>
+        <item name="android:paddingStart">5dp</item>
+        <item name="android:paddingEnd">5dp</item>
+        <item name="android:paddingTop">1dp</item>
+        <item name="android:paddingBottom">1dp</item>
+        <item name="android:letterSpacing">0.04</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
     </style>
 </resources>

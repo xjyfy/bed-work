@@ -34,7 +34,11 @@ android-app/local.properties
 pc-service/build/
 pc-service/dist/
 dist-installer/
+dist-android/
 *.spec.bak
+
+# 外部记忆库（不属于本仓）
+.dsh-meow/
 
 # 另一个独立仓库（自带 .git）
 remote-mic-app-windows/

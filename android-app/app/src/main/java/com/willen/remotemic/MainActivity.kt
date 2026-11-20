@@ -1,22 +1,41 @@
 package com.willen.remotemic
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
+import android.view.View
+import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.willen.remotemic.audio.AudioBus
 import com.willen.remotemic.databinding.ActivityMainBinding
 import com.willen.remotemic.service.RecorderService
@@ -57,6 +76,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingVoiceStop: Runnable? = null
     private var lastVoiceUpAt = 0L
     private var suppressStopOnce = false
+    private val waveAnimators = mutableListOf<ObjectAnimator>()
+    private var deleteRepeat: Runnable? = null
 
     private val prefs by lazy { getSharedPreferences("remote_mic", MODE_PRIVATE) }
 
@@ -134,6 +155,19 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // Android 15 起默认边到边：自己按状态栏 / 导航栏 inset 留白，避免顶栏被状态栏盖住
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.updatePadding(
+                left = dp(16) + bars.left,
+                top = dp(10) + bars.top,
+                right = dp(16) + bars.right,
+                bottom = dp(12) + bars.bottom
+            )
+            insets
+        }
+
         client = buildClient()
 
         // 传输线程里回调也走这里，Toast 必须切回主线程（否则直接崩：
@@ -151,7 +185,6 @@ class MainActivity : AppCompatActivity() {
         loadDevices()
         ensurePermissions()
         bindButtons()
-        setupDpadSizing()
         applyAppSlotsFromPrefs()   // 先用上次缓存的图标/名称垫上，连上后再刷新
         updateVoiceButton()
         renderHeader()
@@ -183,49 +216,6 @@ class MainActivity : AppCompatActivity() {
         }
         registerReceiver(screenReceiver, filter)
     }
-
-    /**
-     * 方向区吃掉页面的剩余高度，里面九宫格的格子必须跟着剩余高度算尺寸，
-     * 否则固定 dp 要么撑出一屏（被迫滚动）、要么四周空一大片。
-     * 取「高度算出来的格子」和「宽度算出来的格子」的较小值，保证不越界也不变形。
-     */
-    private fun setupDpadSizing() {
-        binding.dpadArea.addOnLayoutChangeListener { v, _, top, _, bottom, _, oldTop, _, oldBottom ->
-            if (bottom - top == oldBottom - oldTop) return@addOnLayoutChangeListener
-            val areaH = bottom - top
-            if (areaH <= 0 || v.width <= 0) return@addOnLayoutChangeListener
-            val d = resources.displayMetrics.density
-            val gap = (8 * d).toInt()
-            val cancelRow = (46 * d).toInt() + (10 * d).toInt()   // 取消/确定那一行 + 上间距
-            val byHeight = (areaH - cancelRow - 2 * gap) / 3
-            // 九宫格自己居中，滚轮列贴右边：给右边缘留出「滚轮宽 + 间距」，
-            // 格子既不会压到滚轮，左右也留出同样的空白，方向键就在屏幕中线上。
-            val sideRoom = (48 * d).toInt() + (8 * d).toInt()
-            val byWidth = (v.width - 2 * sideRoom - 2 * gap) / 3
-            val cell = minOf(byHeight, byWidth, (96 * d).toInt())
-            if (cell <= 0 || cell == dpadCell) return@addOnLayoutChangeListener
-            dpadCell = cell
-            val grid = binding.dpadGrid
-            for (i in 0 until grid.childCount) {
-                val child = grid.getChildAt(i)
-                val lp = child.layoutParams
-                lp.width = cell
-                lp.height = cell
-                child.layoutParams = lp
-            }
-            // 滚轮两键做得比格子更窄长（宽度固定 64dp），整体在方向区里垂直居中
-            val wheelTotal = 3 * cell + 2 * gap
-            val wheelEach = minOf((cell * 1.3f).toInt(), (wheelTotal / 2 - (6 * d).toInt()))
-                .coerceAtLeast((48 * d).toInt())
-            listOf(binding.btnScrollPrev, binding.btnScrollNext).forEach {
-                val lp = it.layoutParams
-                lp.height = wheelEach
-                it.layoutParams = lp
-            }
-        }
-    }
-
-    private var dpadCell = 0
 
     // ------------------------------------------------------------------ 权限
 
@@ -373,13 +363,12 @@ class MainActivity : AppCompatActivity() {
             connected -> "待命"
             else -> "未连接"
         }
-        binding.statusDot.setBackgroundColor(
-            when {
-                connected && active -> 0xFF4CAF50.toInt()
-                connected -> 0xFFFFA000.toInt()
-                else -> 0xFF9E9E9E.toInt()
-            }
-        )
+        val dotColor = when {
+            connected && active -> 0xFF2F9E63.toInt()
+            connected -> 0xFFFFA000.toInt()
+            else -> 0xFF9E9E9E.toInt()
+        }
+        binding.statusDot.backgroundTintList = ColorStateList.valueOf(dotColor)
         // 连接状态一变（扫码后建连、切换设备、掉线）就同步刷新设备管理列表里的圆点
         deviceListRefresh?.invoke()
     }
@@ -387,133 +376,253 @@ class MainActivity : AppCompatActivity() {
     private fun isOnline(device: Device): Boolean =
         connected && device.token == current?.token
 
-    private fun dotText(online: Boolean): String = if (online) "●" else "○"
-
-    private fun dotColor(online: Boolean): Int =
-        if (online) 0xFF4CAF50.toInt() else 0xFF9E9E9E.toInt()
-
-    /** 点顶部设备名：直接下拉已绑定设备列表，可当场切换被控设备。 */
+    /** 点顶部设备名：下拉已绑定设备列表，可当场切换被控设备。 */
     private fun showDeviceMenu() {
         if (devices.isEmpty()) {
             // 一台都没绑定时不必先进设备管理，点顶栏直接开扫码页（绑定只能扫码）
             startScan()
             return
         }
-        if (devices.size == 1) {
-            val only = devices[0]
-            toast("当前只有一台设备：${only.name}（${if (isOnline(only)) "在线" else "未连接"}）")
-            return
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_device_pop)
         }
-        val popup = android.widget.PopupMenu(this, binding.tvDevice)
-        devices.forEachIndexed { index, device ->
+
+        var popup: PopupWindow? = null
+
+        devices.forEach { device ->
             val online = isOnline(device)
-            val label = "${dotText(online)}  ${device.name}"
-            val item = android.text.SpannableString(label)
-            item.setSpan(
-                android.text.style.ForegroundColorSpan(dotColor(online)),
-                0, 1,
-                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
-            popup.menu.add(0, index, index, item)
-        }
-        popup.setOnMenuItemClickListener { item ->
-            val device = devices[item.itemId]
-            if (device.token == current?.token && connected) {
-                toast("已经在控制 ${device.name}")
-            } else {
-                connectTo(device)
-                toast("正在切换到 ${device.name}")
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), 0, dp(10), 0)
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_pop_item)
             }
-            true
+
+            val dot = View(this).apply {
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_dot)
+                backgroundTintList = ColorStateList.valueOf(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        if (online) R.color.ok else R.color.dot_off
+                    )
+                )
+            }
+            row.addView(dot, LinearLayout.LayoutParams(dp(7), dp(7)))
+
+            row.addView(TextView(this).apply {
+                text = device.name
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text))
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dp(8) })
+
+            row.addView(TextView(this).apply {
+                text = if (online) "在线" else "未连接"
+                textSize = 11f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.muted))
+            })
+
+            val check = ImageView(this).apply {
+                setImageResource(R.drawable.ic_check)
+                imageTintList = ColorStateList.valueOf(
+                    ContextCompat.getColor(this@MainActivity, R.color.accent)
+                )
+                alpha = if (device.token == current?.token) 1f else 0f
+            }
+            row.addView(check, LinearLayout.LayoutParams(dp(17), dp(17)).apply { marginStart = dp(6) })
+
+            row.click {
+                popup?.dismiss()
+                if (device.token == current?.token && connected) {
+                    toast("已经在控制 ${device.name}")
+                } else {
+                    connectTo(device)
+                    toast("正在切换到 ${device.name}")
+                }
+            }
+            content.addView(row, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(46)
+            ))
         }
-        popup.show()
+
+        val sepLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
+        )
+        sepLp.setMargins(dp(8), dp(5), dp(8), dp(5))
+        content.addView(View(this).apply {
+            setBackgroundColor(ContextCompat.getColor(this@MainActivity, R.color.line))
+        }, sepLp)
+
+        val add = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, dp(10), 0)
+            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_pop_item)
+        }
+        add.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_qr)
+            imageTintList = ColorStateList.valueOf(
+                ContextCompat.getColor(this@MainActivity, R.color.accent)
+            )
+        }, LinearLayout.LayoutParams(dp(17), dp(17)))
+        add.addView(TextView(this).apply {
+            text = "绑定新设备"
+            textSize = 13f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.accent))
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            .apply { marginStart = dp(8) })
+        add.click {
+            popup?.dismiss()
+            startScan()
+        }
+        content.addView(add, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+        ))
+
+        popup = PopupWindow(
+            content,
+            dp(280),
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            true
+        ).apply {
+            isOutsideTouchable = true
+            elevation = dp(14).toFloat()
+            setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+        }
+        popup?.showAsDropDown(
+            binding.tvDevice,
+            (binding.tvDevice.width - dp(280)) / 2,
+            dp(6)
+        )
     }
 
-    /** 设备管理页：列出已绑定电脑（圆点表示在线）、扫码新增、删除、切换。 */
+    /** 设备管理：底部玻璃抽屉，列出已绑定电脑（圆点表示在线）、扫码新增、删除、切换。 */
     private fun showBindingDialog() {
-        val ctx = this
-        val scroll = ScrollView(ctx)
-        val list = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 16, 32, 16)
-        }
-        scroll.addView(list)
+        if (isFinishing || isDestroyed) return
+
+        val sheet = BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.dialog_device, null)
+        sheet.setContentView(view)
+        sheet.behavior.peekHeight = (resources.displayMetrics.heightPixels * 0.55f).toInt()
+
+        val list = view.findViewById<LinearLayout>(R.id.deviceList)
+        val closeIcon = view.findViewById<View>(R.id.btnCloseSheetIcon)
+        val closeText = view.findViewById<View>(R.id.btnCloseSheet)
+        val scan = view.findViewById<View>(R.id.btnScanBind)
 
         fun rebuild() {
             list.removeAllViews()
             if (devices.isEmpty()) {
-                list.addView(TextView(ctx).apply { text = "还没有绑定任何电脑，点下方「扫码绑定」" })
+                list.addView(TextView(this).apply {
+                    text = "还没有绑定任何电脑，点下方「扫码绑定设备」"
+                    textSize = 13f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.muted))
+                    setPadding(0, dp(8), 0, dp(8))
+                })
             }
             devices.forEach { device ->
                 val online = isOnline(device)
-                val row = LinearLayout(ctx).apply {
+                val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, 8, 0, 8)
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(12), dp(10), dp(12))
+                    background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_device_row)
                 }
-                val dot = TextView(ctx).apply {
-                    text = dotText(online)
-                    setTextColor(dotColor(online))
-                    textSize = 18f
-                    setPadding(0, 0, 12, 0)
+
+                val dot = View(this).apply {
+                    background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_dot)
+                    backgroundTintList = ColorStateList.valueOf(
+                        ContextCompat.getColor(
+                            this@MainActivity,
+                            if (online) R.color.ok else R.color.dot_off
+                        )
+                    )
                 }
-                val info = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-                info.addView(TextView(ctx).apply {
-                    text = if (online) "${device.name}（在线）" else "${device.name}（未连接）"
-                    textSize = 16f
+                row.addView(dot, LinearLayout.LayoutParams(dp(8), dp(8)))
+
+                val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                info.addView(TextView(this).apply {
+                    text = device.name
+                    textSize = 15f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text))
                 })
-                info.addView(TextView(ctx).apply {
-                    text = device.endpoint
-                    textSize = 12f
-                    setTextColor(0xFF888888.toInt())
+                info.addView(TextView(this).apply {
+                    text = "${if (online) "在线" else "未连接"} · ${device.endpoint}"
+                    textSize = 11f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.muted))
+                    setPadding(0, dp(2), 0, 0)
                 })
-                info.setOnClickListener {
+                info.click {
                     if (online) {
-                        Toast.makeText(ctx, "已经在控制 ${device.name}", Toast.LENGTH_SHORT).show()
+                        toast("已经在控制 ${device.name}")
                     } else {
                         connectTo(device)
-                        Toast.makeText(ctx, "正在切换到 ${device.name}", Toast.LENGTH_SHORT).show()
+                        toast("正在切换到 ${device.name}")
                         rebuild()
                     }
                 }
-                val del = Button(ctx).apply {
-                    text = "删除"
-                    setOnClickListener {
-                        devices.removeAll { it.token == device.token }
-                        saveDevices()
-                        if (current?.token == device.token) {
-                            current = null
-                            connected = false
-                            client.close()
-                            prefs.edit().putString("current_token", "").apply()
-                            renderHeader()
-                        }
-                        rebuild()
-                    }
-                }
-                row.addView(dot, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-                row.addView(info, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                row.addView(del, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-                list.addView(row)
-            }
+                row.addView(
+                    info,
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        .apply { marginStart = dp(10) }
+                )
 
-            val actions = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-            actions.addView(Button(ctx).apply {
-                text = "扫码绑定设备"
-                setOnClickListener { startScan() }
-            })
-            list.addView(actions)
+                val del = ImageButton(this).apply {
+                    setImageResource(R.drawable.ic_trash)
+                    imageTintList = ColorStateList.valueOf(
+                        ContextCompat.getColor(this@MainActivity, R.color.primary)
+                    )
+                    background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_ghost_delete)
+                    contentDescription = "删除 ${device.name}"
+                    setPadding(dp(11), dp(11), dp(11), dp(11))
+                }
+                del.click {
+                    devices.removeAll { it.token == device.token }
+                    saveDevices()
+                    if (current?.token == device.token) {
+                        current = null
+                        connected = false
+                        client.close()
+                        prefs.edit().putString("current_token", "").apply()
+                        renderHeader()
+                    }
+                    rebuild()
+                }
+                row.addView(del, LinearLayout.LayoutParams(dp(44), dp(44)))
+
+                list.addView(
+                    row,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { if (list.childCount > 0) topMargin = dp(8) }
+                )
+            }
         }
         rebuild()
 
-        val console = AlertDialog.Builder(this)
-            .setTitle("设备管理")
-            .setView(scroll)
-            .setNegativeButton("关闭", null)
-            .create()
+        scan.click { startScan() }
+        closeIcon.click { sheet.dismiss() }
+        closeText.click { sheet.dismiss() }
+
         deviceListRefresh = { rebuild() }
-        console.setOnDismissListener { deviceListRefresh = null }
-        console.show()
+        sheet.setOnDismissListener { deviceListRefresh = null }
+        sheet.setOnShowListener {
+            sheet.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+                ?.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        }
+        sheet.window?.let { win ->
+            win.navigationBarColor = ContextCompat.getColor(this, R.color.white)
+            if (Build.VERSION.SDK_INT >= 29) {
+                win.isNavigationBarContrastEnforced = false
+            }
+        }
+        sheet.show()
     }
 
     private fun startScan() {
@@ -756,6 +865,8 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
     // ------------------------------------------------------------------ 截屏
 
     /** 请求电脑端截屏：结果通过 onMessage 的 "screenshot" 帧回来。 */
@@ -910,10 +1021,45 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateVoiceButton() {
-        binding.btnVoice.text = when {
+        val live = voiceOn || openMode
+        binding.tvVoiceTitle.text = if (live) "说话中" else "按住说话"
+        binding.tvVoiceSub.text = when {
             openMode -> "点击结束"
-            voiceOn -> "说话中…"
-            else -> "按住说话·双击常开"
+            voiceOn -> "松手/点击结束"
+            else -> "双击常开"
+        }
+        binding.btnVoice.isActivated = live
+        binding.ivVoiceIcon.visibility = if (live) View.GONE else View.VISIBLE
+        binding.voiceWave.visibility = if (live) View.VISIBLE else View.GONE
+        setWaveAnimating(live)
+    }
+
+    /** 说话中：五根波形柱错峰伸缩；结束后停下并复位。 */
+    private fun setWaveAnimating(on: Boolean) {
+        val bars = listOf(
+            binding.voiceBar1,
+            binding.voiceBar2,
+            binding.voiceBar3,
+            binding.voiceBar4,
+            binding.voiceBar5
+        )
+        if (on) {
+            if (waveAnimators.isNotEmpty()) return
+            bars.forEachIndexed { index, bar ->
+                val animator = ObjectAnimator.ofFloat(
+                    bar, View.SCALE_Y, 0.45f, 1.05f, 0.55f, 0.9f
+                )
+                animator.duration = 700L + index * 90L
+                animator.startDelay = index * 70L
+                animator.repeatCount = ValueAnimator.INFINITE
+                animator.interpolator = LinearInterpolator()
+                animator.start()
+                waveAnimators.add(animator)
+            }
+        } else {
+            waveAnimators.forEach { it.cancel() }
+            waveAnimators.clear()
+            bars.forEach { it.scaleY = 1f }
         }
     }
 
@@ -935,14 +1081,62 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ 按钮
 
-    private fun bindButtons() {
-        binding.btnSettings.setOnClickListener { showBindingDialog() }
-        binding.tvDevice.setOnClickListener { showDeviceMenu() }
+    /** 退格：单击删一个；长按 350ms 后开始连删，间隔从 120ms 逐步降到 34ms。 */
+    private fun bindDeleteKey(view: View) {
+        var interval = 120L
+        val repeat = object : Runnable {
+            override fun run() {
+                send("key", "code" to "delete", "action" to "down")
+                interval = (interval - 8L).coerceAtLeast(34L)
+                deleteRepeat = this
+                uiHandler.postDelayed(this, interval)
+            }
+        }
 
-        binding.btnUp.press { send("key", "code" to "up", "action" to "down") }
-        binding.btnDown.press { send("key", "code" to "down", "action" to "down") }
-        binding.btnLeft.press { send("key", "code" to "left", "action" to "down") }
-        binding.btnRight.press { send("key", "code" to "right", "action" to "down") }
+        // 键盘 / 无障碍单击（触摸路径被下面的 OnTouchListener 消费，不会重复）
+        view.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            send("key", "code" to "delete", "action" to "down")
+        }
+
+        view.setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    v.animate().scaleX(.95f).scaleY(.95f).setDuration(90).start()
+                    stopDeleteRepeat()
+                    // 按下先删一个，再等 350ms 进入连删
+                    send("key", "code" to "delete", "action" to "down")
+                    interval = 120L
+                    deleteRepeat = repeat
+                    uiHandler.postDelayed(repeat, 350L)
+                    true
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+                    stopDeleteRepeat()
+                    true
+                }
+
+                else -> false
+            }
+        }
+    }
+
+    private fun stopDeleteRepeat() {
+        deleteRepeat?.let { uiHandler.removeCallbacks(it) }
+        deleteRepeat = null
+    }
+
+    private fun bindButtons() {
+        binding.btnSettings.click { showBindingDialog() }
+        binding.tvDevice.click { showDeviceMenu() }
+
+        // 方向环：与原来的四个方向键完全等价，只发 up/right/down/left 的 key.down
+        binding.ringPad.onDirection = { code: String, action: String ->
+            send("key", "code" to code, "action" to action)
+        }
         binding.btnOk.click { send("key", "code" to "ok", "action" to "down") }
         binding.btnCancel.click { send("key", "code" to "esc", "action" to "down") }
 
@@ -1000,7 +1194,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnPaste.click { sendClipboard() }
         binding.btnScreenshot.click { requestScreenshot() }
-        binding.btnDelete.click { send("key", "code" to "delete", "action" to "down") }
+        bindDeleteKey(binding.btnDelete)
 
         binding.btnSendMedia.click { pickMedia() }
         binding.btnSendFile.click { pickDocument() }
@@ -1021,6 +1215,11 @@ class MainActivity : AppCompatActivity() {
         binding.btnScrollPrev.click { send("key", "code" to "scroll_prev", "action" to "down") }
     }
 
+    override fun onPause() {
+        stopDeleteRepeat()
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
         if (firstResume) {
@@ -1034,6 +1233,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         cancelPendingVoiceStop()
+        stopDeleteRepeat()
+        waveAnimators.forEach { it.cancel() }
+        waveAnimators.clear()
         AudioBus.onPcm = null
         transferObserver?.let { TransferBus.forget(it) }
         transferObserver = null
