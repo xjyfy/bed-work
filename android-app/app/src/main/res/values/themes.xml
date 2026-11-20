@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.RemoteMic" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorPrimaryDark">@color/primary_dark</item>
+        <item name="android:colorBackground">@color/surface</item>
+        <item name="android:textColor">@color/on_surface</item>
+    </style>
+
+    <!-- 紧凑按键：去掉 Material 默认的上下内缩与左右内边距，让两三个字能单行排下 -->
+    <style name="Widget.RemoteMic.Key" parent="Widget.Material3.Button">
+        <item name="android:textSize">13sp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:paddingLeft">2dp</item>
+        <item name="android:paddingRight">2dp</item>
+        <item name="android:insetLeft">0dp</item>
+        <item name="android:insetRight">0dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <!-- 方向圆盘的圆形按键 -->
+    <style name="Widget.RemoteMic.Round" parent="Widget.RemoteMic.Key">
+        <item name="cornerRadius">32dp</item>
+    </style>
+</resources>

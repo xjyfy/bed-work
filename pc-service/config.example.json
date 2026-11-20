@@ -1,0 +1,24 @@
+{
+  "host": "0.0.0.0",
+  "port": 8765,
+  "computer_name": "",
+  "sample_rate": 16000,
+  "channels": 1,
+  "sample_width_bytes": 2,
+  "frame_ms": 20,
+  "audio_device_keyword": "CABLE Input",
+  "voice_hotkey": ["ctrl", "win"],
+  "send_hotkey": {
+    "default": ["enter"],
+    "weixin.exe": ["ctrl", "enter"],
+    "doubao.exe": ["enter"]
+  },
+  "slot_send_hotkey": {},
+  "remotes": [],
+  "apps": {
+    "1": "",
+    "2": "",
+    "3": "",
+    "4": ""
+  }
+}

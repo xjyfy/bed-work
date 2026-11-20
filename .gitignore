@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 日志与运行时数据
+*.log
+pc-service/logs/
+pc-service/files/
+pc-service/lock/
+pc-service/prepare/
+pc-service/ready/
+pc-service/settings/
+
+# 本地配置（含遥控器 token，不入库；模板见 config.example.json）
+pc-service/config.json
+
+# Android 构建产物
+android-app/.gradle/
+android-app/.idea/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+*.apk
+*.aab
+*.hprof
+
+# 临时产物
+.tmp/
+
+# 另一个独立仓库（自带 .git）
+remote-mic-app-windows/
