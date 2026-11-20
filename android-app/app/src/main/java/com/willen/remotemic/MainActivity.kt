@@ -151,6 +151,7 @@ class MainActivity : AppCompatActivity() {
         loadDevices()
         ensurePermissions()
         bindButtons()
+        setupDpadSizing()
         applyAppSlotsFromPrefs()   // 先用上次缓存的图标/名称垫上，连上后再刷新
         updateVoiceButton()
         renderHeader()
@@ -182,6 +183,45 @@ class MainActivity : AppCompatActivity() {
         }
         registerReceiver(screenReceiver, filter)
     }
+
+    /**
+     * 方向区吃掉页面的剩余高度，里面九宫格的格子必须跟着剩余高度算尺寸，
+     * 否则固定 dp 要么撑出一屏（被迫滚动）、要么四周空一大片。
+     * 取「高度算出来的格子」和「宽度算出来的格子」的较小值，保证不越界也不变形。
+     */
+    private fun setupDpadSizing() {
+        binding.dpadArea.addOnLayoutChangeListener { v, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top == oldBottom - oldTop) return@addOnLayoutChangeListener
+            val areaH = bottom - top
+            if (areaH <= 0 || v.width <= 0) return@addOnLayoutChangeListener
+            val d = resources.displayMetrics.density
+            val gap = (8 * d).toInt()
+            val cancelRow = (46 * d).toInt() + (10 * d).toInt()   // 取消/确定那一行 + 上间距
+            val byHeight = (areaH - cancelRow - 2 * gap) / 3
+            val wheelCol = (96 * d).toInt() + (12 * d).toInt()    // 滚轮列 + 左间距
+            val byWidth = (v.width - wheelCol - 2 * gap) / 3
+            val cell = minOf(byHeight, byWidth, (100 * d).toInt())
+            if (cell <= 0 || cell == dpadCell) return@addOnLayoutChangeListener
+            dpadCell = cell
+            val grid = binding.dpadGrid
+            for (i in 0 until grid.childCount) {
+                val child = grid.getChildAt(i)
+                val lp = child.layoutParams
+                lp.width = cell
+                lp.height = cell
+                child.layoutParams = lp
+            }
+            // 滚轮两键跟随九宫格格子大小（跟方向键同尺寸更协调），在区内垂直居中
+            val wheelEach = cell
+            listOf(binding.btnScrollPrev, binding.btnScrollNext).forEach {
+                val lp = it.layoutParams
+                lp.height = wheelEach
+                it.layoutParams = lp
+            }
+        }
+    }
+
+    private var dpadCell = 0
 
     // ------------------------------------------------------------------ 权限
 
