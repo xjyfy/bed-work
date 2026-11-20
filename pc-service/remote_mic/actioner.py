@@ -93,6 +93,11 @@ _MIN_WIN_W = 120   # 真实窗口最小宽（像素），用于排除消息窗 /
 _MIN_WIN_H = 80
 _SW_SHOW = 5
 _SW_RESTORE = 9
+_SWP_NOZORDER = 0x0004
+_SM_XVIRTUALSCREEN = 76
+_SM_YVIRTUALSCREEN = 77
+_SM_CXVIRTUALSCREEN = 78
+_SM_CYVIRTUALSCREEN = 79
 
 user32.EnumWindows.argtypes = [_ENUM_WINDOWS_PROC, wintypes.LPARAM]
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -473,6 +478,8 @@ class Actioner:
                 # 停在屏幕外（如 -21333）也算隐藏：SetForegroundWindow 对它无效，得先挪回来
                 "offscreen": rect.right <= 0 or rect.bottom <= 0 or normal.left < -9000,
                 "area": max(cur_w * cur_h, nor_w * nor_h),
+                "rect": (rect.left, rect.top, rect.right, rect.bottom),
+                "normal_rect": (normal.left, normal.top, normal.right, normal.bottom),
             })
             return True
 
@@ -511,17 +518,17 @@ class Actioner:
         wins = self._find_windows_by_exe(exe_name)
         if not wins:
             return False
-        win = wins[0]
-        if len(wins) > 1 or not win["visible"]:
+        if len(wins) > 1 or not wins[0]["visible"]:
             logger.info(
-                "windows of %s: %d (hidden=%d) -> use hwnd=%s title=%r",
-                exe_name, len(wins), sum(1 for w in wins if not w["visible"]),
-                win["hwnd"], win["title"],
+                "windows of %s: %d (hidden=%d) -> try %s",
+                exe_name, len(wins), sum(1 for w in wins if not w["visible"]), wins[0]["hwnd"],
             )
-        hwnd = win["hwnd"]
-        # 最大化保持最大化；隐藏（托盘）/ 停到屏幕外 / 普通 / 最小化一律 restore 拉回前台
-        show_cmd = 3 if win["show_cmd"] == 3 else _SW_RESTORE
-        return self._activate_window(hwnd, show_cmd, hidden=(not win["visible"]) or win["offscreen"])
+        for win in wins:
+            # 最大化保持最大化；隐藏（托盘）/ 停到屏幕外 / 普通 / 最小化一律 restore 拉回前台
+            show_cmd = 3 if win["show_cmd"] == 3 else _SW_RESTORE
+            if self._activate_window(win["hwnd"], show_cmd, hidden=(not win["visible"]) or win["offscreen"]):
+                return True
+        return False
 
     def _is_foreground(self, hwnd: int) -> bool:
         fg = user32.GetForegroundWindow()
@@ -534,6 +541,55 @@ class Actioner:
                 return True
             time.sleep(0.1)
         return self._is_foreground(hwnd)
+
+    def _screen_bounds(self) -> tuple[int, int, int, int]:
+        x = user32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
+        y = user32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
+        w = user32.GetSystemMetrics(_SM_CXVIRTUALSCREEN)
+        h = user32.GetSystemMetrics(_SM_CYVIRTUALSCREEN)
+        return x, y, x + w, y + h
+
+    def _window_rect(self, hwnd: int) -> tuple[int, int, int, int] | None:
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        return rect.left, rect.top, rect.right, rect.bottom
+
+    def _on_screen(self, hwnd: int) -> bool:
+        """窗口是否真的落在虚拟桌面可见区域内（不是挪到 -21333 那种"假显示"）。"""
+        r = self._window_rect(hwnd)
+        if not r:
+            return False
+        sx, sy, ex, ey = self._screen_bounds()
+        iw = min(r[2], ex) - max(r[0], sx)
+        ih = min(r[3], ey) - max(r[1], sy)
+        return iw >= 80 and ih >= 60
+
+    def _pull_on_screen(self, hwnd: int) -> None:
+        """把停在屏幕外的窗口搬回可见区域。
+
+        微信关到托盘 / 最小化时窗口会被挪到 (-21333, -21333)，这种状态下
+        ShowWindow(SW_RESTORE) + SetForegroundWindow 会**成功返回**、前台读回也
+        通过，但窗口仍在屏幕外——用户看到的就是"点了快捷应用没反应"。
+        """
+        if self._on_screen(hwnd):
+            return
+        sx, sy, ex, ey = self._screen_bounds()
+        r = self._window_rect(hwnd) or (0, 0, 0, 0)
+        w = r[2] - r[0]
+        h = r[3] - r[1]
+        if w < 200 or h < 150:
+            w, h = 1200, 800
+        w = min(w, ex - sx - 80)
+        h = min(h, ey - sy - 80)
+        x = sx + max(40, (ex - sx - w) // 2)
+        y = sy + max(40, (ey - sy - h) // 2)
+        user32.SetWindowPos(hwnd, 0, x, y, w, h, _SWP_NOZORDER)
+        logger.info("window %s moved on-screen to (%d,%d %dx%d)", hwnd, x, y, w, h)
+        time.sleep(0.05)
+
+    def _visible_ok(self, hwnd: int) -> bool:
+        return bool(user32.IsWindowVisible(hwnd)) and self._on_screen(hwnd)
 
     def _activate_window(self, hwnd: int, show_cmd: int, hidden: bool = False) -> bool:
         """前置目标窗口；成功判据是前台读回属于目标，而非 SetForegroundWindow 的 BOOL。
@@ -553,6 +609,7 @@ class Actioner:
             # 托盘里的窗口必须先显形，否则 SetForegroundWindow 对隐藏窗口无效
             user32.ShowWindow(hwnd, _SW_SHOW)
             time.sleep(0.05)
+            self._pull_on_screen(hwnd)
 
         fg = user32.GetForegroundWindow()
         fg_tid = user32.GetWindowThreadProcessId(fg, None)
@@ -568,7 +625,9 @@ class Actioner:
             if attached:
                 user32.AttachThreadInput(fg_tid, our_tid, False)
 
-        if self._readback(hwnd):
+        # ShowWindow 之后再确认一次位置：SW_RESTORE 可能把窗口恢复到屏幕外的老位置
+        self._pull_on_screen(hwnd)
+        if self._readback(hwnd) and self._visible_ok(hwnd):
             return True
 
         # 兜底：当前前台仍占用且拒绝附加时，先把它最小化，再还原并置前目标。
@@ -578,9 +637,10 @@ class Actioner:
             time.sleep(0.1)
         user32.ShowWindow(hwnd, _SW_SHOW)
         user32.ShowWindow(hwnd, show_cmd)
+        self._pull_on_screen(hwnd)
         user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
-        return self._readback(hwnd)
+        return self._readback(hwnd) and self._visible_ok(hwnd)
 
     def _extract_exe_name(self, path: str) -> str:
         """从纯路径或带引号/参数的命令行里提取可执行文件名（小写 basename）。
@@ -618,15 +678,18 @@ class Actioner:
                 # 1) 已有窗口（含关到托盘的隐藏窗口）→ 只切换，绝不新起进程
                 wins = self._find_windows_by_exe(exe_name)
                 if wins:
-                    win = wins[0]
-                    show_cmd = 3 if win["show_cmd"] == 3 else _SW_RESTORE
-                    hidden = (not win["visible"]) or win["offscreen"]
-                    if self._activate_window(win["hwnd"], show_cmd, hidden=hidden):
-                        logger.info(
-                            "focused existing slot %s: %s (hwnd=%s hidden=%s, windows=%d)",
-                            slot, exe_name, win["hwnd"], hidden, len(wins),
-                        )
-                    else:
+                    done = False
+                    for win in wins:
+                        show_cmd = 3 if win["show_cmd"] == 3 else _SW_RESTORE
+                        hidden = (not win["visible"]) or win["offscreen"]
+                        if self._activate_window(win["hwnd"], show_cmd, hidden=hidden):
+                            logger.info(
+                                "focused existing slot %s: %s (hwnd=%s hidden=%s, windows=%d)",
+                                slot, exe_name, win["hwnd"], hidden, len(wins),
+                            )
+                            done = True
+                            break
+                    if not done:
                         # 关键：窗口找到了但置前失败，绝不能当成"没在运行"去 startfile，
                         # 否则就是用户看到的"切换应用却多开一个新实例"。
                         logger.warning(
