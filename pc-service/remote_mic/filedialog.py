@@ -20,8 +20,7 @@ OFN_NOCHANGEDIR = 0x00000008
 OFN_HIDEREADONLY = 0x00000004
 
 
-class _OPENFILENAMEW(ctypes.Structure):
-    _fields_ = [
+class _OPENFILENAMEW(ctypes.Structure):    _fields_ = [
         ("lStructSize", ctypes.c_ulong),
         ("hwndOwner", ctypes.c_void_p),
         ("hInstance", ctypes.c_void_p),
@@ -48,12 +47,19 @@ class _OPENFILENAMEW(ctypes.Structure):
     ]
 
 
+_comdlg32 = ctypes.WinDLL("comdlg32", use_last_error=True)
+_comdlg32.GetOpenFileNameW.argtypes = [ctypes.POINTER(_OPENFILENAMEW)]
+_comdlg32.GetOpenFileNameW.restype = ctypes.c_int
+
+
 def pick_files(title: str = "选择要发送到手机的文件", max_files: int = 50) -> List[str]:
     """弹多选文件框，返回绝对路径列表；取消返回 []。"""
     buf = ctypes.create_unicode_buffer(65536)
     ofn = _OPENFILENAMEW()
     ofn.lStructSize = ctypes.sizeof(_OPENFILENAMEW)
-    ofn.lpstrFile = buf
+    # c_wchar_p 字段不能直接吃 c_wchar_Array（新版 ctypes 会报
+    # "incompatible types, c_wchar_Array_65536 instance instead of c_wchar_p"），必须 cast
+    ofn.lpstrFile = ctypes.cast(buf, ctypes.c_wchar_p)
     ofn.nMaxFile = len(buf)
     ofn.lpstrTitle = title
     ofn.lpstrFilter = "所有文件\0*\0\0"
@@ -62,18 +68,21 @@ def pick_files(title: str = "选择要发送到手机的文件", max_files: int 
         | OFN_NOCHANGEDIR | OFN_HIDEREADONLY
     )
     try:
-        ok = ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn))
+        ok = _comdlg32.GetOpenFileNameW(ctypes.byref(ofn))
     except Exception as exc:  # noqa: BLE001 - 极端环境下别把托盘线程带崩
         logger.warning("file dialog failed: %s", exc)
         return []
     if not ok:
         return []
 
-    raw = buf[:]
+    # 多选时缓冲区是 "目录\0文件1\0文件2\0\0"，c_wchar_Array 切片会在第一个 NUL 处截断，
+    # 必须按长度整段读出，再自己 split
+    raw = ctypes.wstring_at(ctypes.addressof(buf), len(buf))
     if not raw:
         return []
-    # 多选时 buf = 目录 \0 文件名1 \0 文件名2 \0 \0；单选时只有一条完整路径
     parts = [p for p in raw.split("\0") if p]
+    if not parts:
+        return []
     if len(parts) == 1:
         return [parts[0]]
     folder = parts[0]

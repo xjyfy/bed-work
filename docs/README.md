@@ -27,6 +27,14 @@
 | [AndroidStudio最小化安装](history/AndroidStudio最小化安装.md) | 另一套开发环境的搭建笔记 |
 | [蓝牙遥控器ATVV调研_gemini](history/蓝牙遥控器ATVV调研_gemini.txt) | 小米蓝牙遥控器 ATVV 协议调研原文 |
 
+## 发布说明（`docs/release-notes-*.md`）
+
+| 版本 | 要点 |
+| --- | --- |
+| [v1.0.2](release-notes-v1.0.2.md) | 托盘「发送文件到手机」点了没反应修复；取消自签签名；audio 可观测、托盘传输进度、重连可观测 |
+| [v1.0.1](release-notes-v1.0.1.md) | 安装包误报 WebView2 / VB-CABLE 修复、status 可见性、图标缓存、UWP 前台（含已废弃的自签签名） |
+| [v1.0.0](release-notes-v1.0.0.md) | 首个可安装版本 |
+
 ## 资源
 
 - 界面截图：[`assets/手机端界面截图.jpg`](assets/手机端界面截图.jpg)

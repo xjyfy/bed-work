@@ -19,6 +19,7 @@ import logging
 import os
 import queue
 import threading
+import time
 import uuid
 from typing import Optional
 
@@ -56,6 +57,7 @@ class _Client:
     __slots__ = (
         "remote_id", "name", "ws", "ip", "seq",
         "allow_files", "rx", "rx_saved", "accept_events", "tx_lock",
+        "connected_at",
     )
 
     def __init__(self, remote_id: str, name: str, ws: ServerConnection, ip: str, seq: int,
@@ -70,6 +72,7 @@ class _Client:
         self.rx_saved: list[str] = []                  # 本轮已落盘的文件名
         self.accept_events: dict[str, asyncio.Event] = {}  # 电脑→手机：手机接受传输的信号
         self.tx_lock = asyncio.Lock()                  # 同一时刻只推一个文件，别把通道挤爆
+        self.connected_at = time.monotonic()           # 会话时长（断线时写日志，便于判断是否被杀）
 
 
 class RemoteMicService:
@@ -90,6 +93,8 @@ class RemoteMicService:
         self._stopping: Optional[threading.Event] = None
 
         self._clients: list[_Client] = []
+        # B7：按 remote_id 累计连接次数，用来判断"手机被杀后有没有自己连回来"
+        self._conn_counts: dict[str, int] = {}
         self._active_id: Optional[str] = None
         self._seq = 0
         self._audio_frames = 0
@@ -140,6 +145,8 @@ class RemoteMicService:
                 "name": c.name,
                 "ip": c.ip,
                 "active": c.remote_id == self._active_id,
+                "reconnects": max(0, self._conn_counts.get(c.remote_id, 1) - 1),
+                "uptime_s": int(time.monotonic() - c.connected_at),
             }
             for c in sorted(self._clients, key=lambda x: x.seq)
         ]
@@ -152,6 +159,8 @@ class RemoteMicService:
             # 下面三项是 2026-11-20 补的"状态可见性"：手机端能在语音不可用时直接提示
             # （声卡没装好 / 输出流没打开），也能显示当前是否停在 Alt+Tab 浮层与 Tab 序号。
             "audio_ready": bool(getattr(self._audio, "ready", False)),
+            # B2：缓冲水位 + 溢出/欠载计数，手机端与设置页能判断"卡不卡"
+            "audio": self._audio.stats() if hasattr(self._audio, "stats") else {},
             "mode": "switcher" if self._actioner.alt_tab_active else "normal",
             "tab_index": self._actioner.tab_index,
         }
@@ -215,6 +224,11 @@ class RemoteMicService:
             asyncio.create_task(self._close_quietly(c.ws))
 
         self._seq += 1
+        # B7：同一台遥控器的第几次连接（1 = 首次，>1 = 断线重连；真机杀进程后据此判断重连是否发生）
+        reconnects = self._conn_counts.get(remote_id, 0)
+        self._conn_counts[remote_id] = reconnects + 1
+        if reconnects:
+            logger.info("remote reconnect #%d: %s (%s)", reconnects, device or remote.get("name"), ws.remote_address)
         client = _Client(
             remote_id=remote_id,
             name=device or str(remote.get("name") or "遥控器"),
@@ -266,7 +280,13 @@ class RemoteMicService:
                 self._active_id = min(self._clients, key=lambda c: c.seq).remote_id if self._clients else None
         self._actioner.reset_modifiers()
         self._audio.set_active(False)
-        logger.info("remote disconnected: %s", client.name)
+        # B7：会话时长写进日志，配合"remote reconnect #n"判断是被杀（短会话后重连）还是正常退出
+        logger.info(
+            "remote disconnected: %s (session %.1f s, total connections %d)",
+            client.name,
+            max(0.0, time.monotonic() - getattr(client, "connected_at", time.monotonic())),
+            self._conn_counts.get(client.remote_id, 1),
+        )
         if self._loop is not None and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._broadcast_status(), self._loop)
 
@@ -660,9 +680,20 @@ class RemoteMicService:
         else:
             self._tray.notify(f"发送失败：{result.get('reason', '未知原因')}")
 
+    def _tray_text(self, text: str) -> None:
+        """托盘 tooltip 的临时状态（传输进度等）；失败不影响主流程。"""
+        tray = self._tray
+        if tray is None or not hasattr(tray, "set_transfer"):
+            return
+        try:
+            tray.set_transfer(text)
+        except Exception:  # noqa: BLE001
+            logger.debug("tray transfer text failed", exc_info=True)
+
     async def _push_files(self, client: _Client, paths: list[str]) -> None:
         total = len(paths)
         for idx, path in enumerate(paths, start=1):
+            name = os.path.basename(path)
             try:
                 size = os.path.getsize(path)
             except OSError:
@@ -670,10 +701,11 @@ class RemoteMicService:
             tid = uuid.uuid4().hex[:12]
             ev = asyncio.Event()
             client.accept_events[tid] = ev
+            self._tray_text(f"等待接收 {idx}/{total} {name}")
             await self._send_json(client, {
                 "type": "file_offer",
                 "transfer_id": tid,
-                "name": os.path.basename(path),
+                "name": name,
                 "size": size,
                 "mime": filex.guess_mime(path),
                 "index": idx,
@@ -682,11 +714,14 @@ class RemoteMicService:
             try:
                 await asyncio.wait_for(ev.wait(), timeout=20)
             except asyncio.TimeoutError:
-                logger.info("file offer timeout: %s", os.path.basename(path))
+                logger.info("file offer timeout: %s", name)
                 client.accept_events.pop(tid, None)
+                self._tray_text("")
                 continue
             client.accept_events.pop(tid, None)
             async with client.tx_lock:
+                sent = 0
+                shown = -1
                 try:
                     with open(path, "rb") as fh:
                         while True:
@@ -694,12 +729,17 @@ class RemoteMicService:
                             if not chunk:
                                 break
                             await client.ws.send(filex.MAGIC + chunk)
+                            sent += len(chunk)
+                            # 每跨过 10% 才刷一次 tooltip，避免高频刷新
+                            pct = int(sent * 100 / size) if size else 100
+                            if pct // 10 != shown:
+                                shown = pct // 10
+                                self._tray_text(f"发送 {idx}/{total} {pct}% {name}")
                     await self._send_json(client, {
                         "type": "file_end", "transfer_id": tid, "ok": True,
-                        "name": os.path.basename(path),
+                        "name": name,
                     })
-                    logger.info("file pushed: %s (%.1f MB) -> %s", os.path.basename(path),
-                                size / 1048576, client.name)
+                    logger.info("file pushed: %s (%.1f MB) -> %s", name, size / 1048576, client.name)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("push file failed: %s", exc)
                     try:
@@ -707,6 +747,7 @@ class RemoteMicService:
                                                        "ok": False, "reason": str(exc)})
                     except Exception:  # noqa: BLE001
                         pass
+        self._tray_text("")
 
     # ------------------------------------------------------------------ 连接
 

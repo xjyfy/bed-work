@@ -52,7 +52,21 @@ class Tray:
             self._icon.icon = _make_icon_image(green)
             self._refresh_menu()
 
-    def set_remotes(self, remotes: list[tuple[str, str, bool]]) -> None:        # 同一 remote_id 只保留一条（防御服务端重复连接残留）
+    def set_transfer(self, text: str = "") -> None:
+        """把传输进度写进托盘 tooltip；空串恢复连接状态。
+
+        Windows 托盘 tooltip 上限 63 字符，超了会被截断甚至不刷新，这里主动裁。
+        """
+        if self._icon is None:
+            return
+        try:
+            base = f"手机遥控麦 - {self._status}"
+            self._icon.title = (f"{base} · {text}" if text else base)[:63]
+        except Exception:  # noqa: BLE001 - tooltip 更新失败不能拖垮传输
+            logger.debug("tray title update failed", exc_info=True)
+
+    def set_remotes(self, remotes: list[tuple[str, str, bool]]) -> None:
+        # 同一 remote_id 只保留一条（防御服务端重复连接残留）
         seen: dict[str, tuple[str, str, bool]] = {}
         for rid, name, active in remotes:
             if rid in seen:

@@ -20,7 +20,7 @@
 ;      FileExists 恒假，驱动永远卸不掉。
 
 #define AppName "手机遥控麦"
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.2"
 #define AppExe "RemoteMicService.exe"
 
 [Setup]

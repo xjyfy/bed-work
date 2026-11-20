@@ -40,6 +40,13 @@ class AudioOut:
         self._read = 0
         self._filled = 0
 
+        # 观测计数（B2）：status 里能看到"卡不卡"，不必翻日志
+        self._frames_in = 0          # 从网络收进来的样本数
+        self._frames_out = 0         # 送往声卡的样本数
+        self._overflows = 0          # 缓冲溢出次数（丢的是最旧的帧）
+        self._underruns = 0          # 欠载次数（说话时缓冲见底，补了静音）
+        self._dropped_samples = 0    # 因溢出被丢掉的样本数
+
     # ------------------------------------------------------------------ 设备
 
     @property
@@ -50,6 +57,31 @@ class AudioOut:
     @property
     def matched_device(self) -> str:
         return f"{self._matched_name} [{self._matched_hostapi}]" if self._matched_name else ""
+
+    def stats(self) -> dict:
+        """缓冲水位与丢帧计数，供 status 帧与设置页显示（B2）。"""
+        with self._lock:
+            capacity = len(self._buf)
+            level_ms = int(self._filled * 1000 / self._sample_rate) if capacity else 0
+            return {
+                "ready": self._ready,
+                "device": self._matched_name,
+                "hostapi": self._matched_hostapi,
+                "level_ms": level_ms,          # 当前缓冲水位（毫秒）
+                "overflows": self._overflows,
+                "underruns": self._underruns,
+                "dropped_samples": self._dropped_samples,
+                "frames_in": self._frames_in,
+                "frames_out": self._frames_out,
+            }
+
+    def reset_stats(self) -> None:
+        with self._lock:
+            self._frames_in = 0
+            self._frames_out = 0
+            self._overflows = 0
+            self._underruns = 0
+            self._dropped_samples = 0
 
     @staticmethod
     def _hostapi_name(dev: dict) -> str:
@@ -176,6 +208,8 @@ class AudioOut:
                 drop = self._filled + n - cap
                 self._read = (self._read + drop) % cap
                 self._filled -= drop
+                self._dropped_samples += drop
+                self._overflows += 1
             first = min(n, cap - self._write)
             self._buf[self._write:self._write + first] = samples[:first]
             rest = n - first
@@ -183,6 +217,7 @@ class AudioOut:
                 self._buf[:rest] = samples[first:]
             self._write = (self._write + n) % cap
             self._filled += n
+            self._frames_in += n
 
     def _callback(self, outdata, frames, _time, _status) -> None:
         with self._lock:
@@ -197,4 +232,8 @@ class AudioOut:
                     chunk[first:first + rest] = self._buf[:rest]
                 self._read = (self._read + n) % cap
                 self._filled -= n
+            elif self._active:
+                # 说话中缓冲见底：这帧会补静音，记一次欠载（空闲时不算）
+                self._underruns += 1
             outdata[:, 0] = chunk
+            self._frames_out += frames
