@@ -475,6 +475,17 @@ foreach ($p in $pairs.pairs) {
 """
 
 
+def missing_icons(exes: list[str]) -> bool:
+    """有任何一个需要图标的可执行文件还没有缓存 PNG。"""
+    for exe in exes:
+        path = str(exe or "")
+        if not path or path.startswith("uwp:") or not os.path.exists(path):
+            continue
+        if not os.path.exists(_icon_path(path)):
+            return True
+    return False
+
+
 def ensure_icons(exes: list[str]) -> None:
     """批量把 exe 关联图标导出为 256px PNG（有缓存则跳过）。"""
     todo = [e for e in exes if e and not e.startswith("uwp:") and os.path.exists(e) and not os.path.exists(_icon_path(e))]

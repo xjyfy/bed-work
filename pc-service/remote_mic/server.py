@@ -205,6 +205,7 @@ class RemoteMicService:
         await self._broadcast_status()
         # 认证完就把四个快捷栏位的名称/图标发过去，手机端按钮不用等用户操作才有图标
         await self._send_json(client, self._apps_frame())
+        self._refresh_icons_async()
         return client
 
     def _unregister(self, client: Optional[_Client]) -> None:
@@ -351,6 +352,31 @@ class RemoteMicService:
             slots.append({"slot": slot, "name": name, "icon": icon})
         return {"type": "apps", "slots": slots}
 
+    def _slot_apps(self) -> list[str]:
+        return [str(p) for p in (self._config.get("apps") or {}).values() if p]
+
+    def _refresh_icons_async(self) -> None:
+        """栏位里有应用还没有图标缓存时，后台导一遍再重推一帧。
+
+        设置页刚换成一个从没导出过图标的应用时，第一次推的帧里 icon 是空的，
+        手机就只剩文字；不补的话得重启服务才会好。
+        """
+        paths = self._slot_apps()
+        if not paths or not applist.missing_icons(paths):
+            return
+
+        def run() -> None:
+            try:
+                applist.ensure_icons(paths)
+                logger.info("slot icons exported, re-pushing apps frame")
+                self.push_apps()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("export slot icons failed: %s", exc)
+
+        import threading
+
+        threading.Thread(target=run, daemon=True, name="app-slot-icons").start()
+
     def push_apps(self) -> None:
         """设置页改完栏位后调用：把新的名称/图标广播给已连的手机。"""
         if self._loop is None or not self._loop.is_running():
@@ -359,6 +385,7 @@ class RemoteMicService:
         for client in list(self._clients):
             asyncio.run_coroutine_threadsafe(self._send_json(client, frame), self._loop)
         logger.info("apps frame pushed to %d client(s)", len(self._clients))
+        self._refresh_icons_async()
 
     def _warm_app_icons(self) -> None:
         """后台把配置里四个栏位的图标导出一遍（首次会调一次 PowerShell）。
