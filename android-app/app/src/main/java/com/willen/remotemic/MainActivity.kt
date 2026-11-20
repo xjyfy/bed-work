@@ -367,7 +367,7 @@ class MainActivity : AppCompatActivity() {
     private fun renderHeader() {
         val device = current
         // 在线状态由左侧圆点 + 状态文字表达，设备名后面不再缀「已连接」
-        binding.tvDevice.text = device?.name ?: "未绑定设备 · 点击绑定"
+        binding.tvDevice.text = device?.name ?: "未绑定设备 · 点击扫码"
         binding.statusText.text = when {
             connected && active -> "控制中"
             connected -> "待命"
@@ -395,7 +395,8 @@ class MainActivity : AppCompatActivity() {
     /** 点顶部设备名：直接下拉已绑定设备列表，可当场切换被控设备。 */
     private fun showDeviceMenu() {
         if (devices.isEmpty()) {
-            showBindingDialog()
+            // 一台都没绑定时不必先进设备管理，点顶栏直接开扫码页（绑定只能扫码）
+            startScan()
             return
         }
         if (devices.size == 1) {
