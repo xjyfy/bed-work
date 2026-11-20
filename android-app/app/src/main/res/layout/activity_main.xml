@@ -9,7 +9,7 @@
     android:paddingStart="16dp"
     android:paddingEnd="16dp"
     android:paddingTop="14dp"
-    android:paddingBottom="10dp">
+    android:paddingBottom="24dp">
 
     <!-- 顶栏：状态（左） / 设备名（正中） / 设置（右）。 -->
     <FrameLayout
@@ -190,15 +190,16 @@
         android:gravity="center"
         android:orientation="vertical">
 
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
+        <!-- 九宫格自己居中在屏幕中线上，滚轮列贴右边（不与九宫格争宽度） -->
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
 
             <GridLayout
                 android:id="@+id/dpadGrid"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
                 android:columnCount="3"
                 android:horizontalGap="8dp"
                 android:rowCount="3"
@@ -260,28 +261,31 @@
             </GridLayout>
 
             <LinearLayout
-                android:layout_width="96dp"
+                android:layout_width="48dp"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center_vertical"
-                android:layout_marginStart="12dp"
+                android:layout_gravity="end|center_vertical"
                 android:orientation="vertical">
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnScrollPrev"
                     style="@style/Widget.RemoteMic.Key"
                     android:layout_width="match_parent"
-                    android:layout_height="72dp"
-                    android:text="滚轮↑" />
+                    android:layout_height="80dp"
+                    android:maxLines="1"
+                    android:text="滚轮↑"
+                    android:textSize="10sp" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnScrollNext"
                     style="@style/Widget.RemoteMic.Key"
                     android:layout_width="match_parent"
-                    android:layout_height="72dp"
+                    android:layout_height="80dp"
                     android:layout_marginTop="12dp"
-                    android:text="滚轮↓" />
+                    android:maxLines="1"
+                    android:text="滚轮↓"
+                    android:textSize="10sp" />
             </LinearLayout>
-        </LinearLayout>
+        </FrameLayout>
 
         <LinearLayout
             android:layout_width="wrap_content"

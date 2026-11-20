@@ -198,9 +198,11 @@ class MainActivity : AppCompatActivity() {
             val gap = (8 * d).toInt()
             val cancelRow = (46 * d).toInt() + (10 * d).toInt()   // 取消/确定那一行 + 上间距
             val byHeight = (areaH - cancelRow - 2 * gap) / 3
-            val wheelCol = (96 * d).toInt() + (12 * d).toInt()    // 滚轮列 + 左间距
-            val byWidth = (v.width - wheelCol - 2 * gap) / 3
-            val cell = minOf(byHeight, byWidth, (100 * d).toInt())
+            // 九宫格自己居中，滚轮列贴右边：给右边缘留出「滚轮宽 + 间距」，
+            // 格子既不会压到滚轮，左右也留出同样的空白，方向键就在屏幕中线上。
+            val sideRoom = (48 * d).toInt() + (8 * d).toInt()
+            val byWidth = (v.width - 2 * sideRoom - 2 * gap) / 3
+            val cell = minOf(byHeight, byWidth, (96 * d).toInt())
             if (cell <= 0 || cell == dpadCell) return@addOnLayoutChangeListener
             dpadCell = cell
             val grid = binding.dpadGrid
@@ -211,8 +213,10 @@ class MainActivity : AppCompatActivity() {
                 lp.height = cell
                 child.layoutParams = lp
             }
-            // 滚轮两键跟随九宫格格子大小（跟方向键同尺寸更协调），在区内垂直居中
-            val wheelEach = cell
+            // 滚轮两键做得比格子更窄长（宽度固定 64dp），整体在方向区里垂直居中
+            val wheelTotal = 3 * cell + 2 * gap
+            val wheelEach = minOf((cell * 1.3f).toInt(), (wheelTotal / 2 - (6 * d).toInt()))
+                .coerceAtLeast((48 * d).toInt())
             listOf(binding.btnScrollPrev, binding.btnScrollNext).forEach {
                 val lp = it.layoutParams
                 lp.height = wheelEach
