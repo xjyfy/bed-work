@@ -83,3 +83,10 @@ def vendor_dir(name: str) -> Path:
         if path.exists():
             return path
     return candidates[0]
+
+
+def asset_path(name: str) -> Path:
+    """本 package 自带资源（应用图标等）。打包后落在 `_internal/remote_mic/assets/`。"""
+    if is_frozen():
+        return _bundle_dir() / "remote_mic" / "assets" / name
+    return Path(__file__).resolve().parent / "assets" / name

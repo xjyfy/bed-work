@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -11,15 +13,39 @@ android {
         applicationId = "com.willen.remotemic"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
+    }
+
+    // release 签名凭据放在仓库根 signing/keystore.properties（连同 keystore 一起被
+    // .gitignore 屏蔽，不进公开仓库）。换机器/换项目把整个 signing/ 拷过去即可复用同一签名。
+    // 注意 Gradle 的 rootProject 是 android-app/，仓库根要再往上一层。
+    val signingPropsFile = rootProject.file("../signing/keystore.properties")
+    val signingProps = Properties().apply {
+        if (signingPropsFile.exists()) signingPropsFile.inputStream().use { load(it) }
+    }
+
+    signingConfigs {
+        create("release") {
+            if (signingPropsFile.exists()) {
+                storeFile = rootProject.file("../${signingProps.getProperty("storeFile")}")
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
-            // 自用发布：沿用本机 debug 签名，保证能直接覆盖已安装的开发版而不丢绑定。
-            // 要上架或对外分发时，换成独立 release keystore 后重新发版。
-            signingConfig = signingConfigs.getByName("debug")
+            // 有 signing/ 就用独立 release 签名；没有则回退 debug 并大声告警——
+            // 回退包只能自用覆盖安装，**绝不能当成 release 发出去**（签名与正式包不同）。
+            if (signingPropsFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.warn("⚠ 缺少 signing/keystore.properties，release 回退 debug 签名，禁止对外发布！")
+                signingConfig = signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

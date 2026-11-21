@@ -22,6 +22,8 @@ SPEC_DIR = Path(SPECPATH).resolve()  # noqa: F821
 datas = [
     (str(SPEC_DIR / "vendor" / "vb-cable"), "vb-cable"),
     (str(SPEC_DIR / "config.example.json"), "."),
+    # 品牌图标（托盘 / 设置页用），与手机端同一设计
+    (str(SPEC_DIR / "remote_mic" / "assets"), "remote_mic/assets"),
 ]
 datas += collect_data_files("webview")
 datas += collect_data_files("qrcode")
@@ -80,6 +82,7 @@ exe = EXE(  # noqa: F821
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(SPEC_DIR / "remote_mic" / "assets" / "app_icon.ico"),
 )
 
 coll = COLLECT(  # noqa: F821

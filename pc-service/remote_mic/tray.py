@@ -13,14 +13,35 @@ from PIL import Image, ImageDraw
 from pystray import Icon, Menu, MenuItem
 
 from . import autostart
+from . import paths
 
 logger = logging.getLogger(__name__)
 
+_base_icon_cache: list = []
+
+
+def _base_icon():
+    """品牌图标（与手机端同一设计）。缺失时返回 None，回退纯色圆点。"""
+    if not _base_icon_cache:
+        try:
+            _base_icon_cache.append(Image.open(paths.asset_path("app_icon.png")).convert("RGBA"))
+        except Exception:  # noqa: BLE001 - 图标缺失不能拖垮托盘
+            logger.warning("brand icon unavailable, fallback to plain dot")
+            _base_icon_cache.append(None)
+    return _base_icon_cache[0]
+
 
 def _make_icon_image(color: str) -> Image.Image:
-    img = Image.new("RGB", (64, 64), "white")
+    base = _base_icon()
+    if base is None:
+        img = Image.new("RGB", (64, 64), "white")
+        ImageDraw.Draw(img).ellipse((12, 12, 52, 52), fill=color)
+        return img
+    img = base.resize((64, 64), Image.LANCZOS)
     draw = ImageDraw.Draw(img)
-    draw.ellipse((12, 12, 52, 52), fill=color)
+    # 右下角状态点：保留灰=未连接 / 绿=控制中 / 黄=待命的原有语义
+    draw.ellipse((43, 43, 61, 61), fill="#FFFFFFFF")
+    draw.ellipse((46, 46, 58, 58), fill=color)
     return img
 
 

@@ -46,6 +46,7 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#AppExe}
+SetupIconFile=..\pc-service\remote_mic\assets\app_icon.ico
 CloseApplications=yes
 RestartApplications=no
 

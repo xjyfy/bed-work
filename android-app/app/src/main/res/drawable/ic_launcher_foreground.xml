@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动图标前景：白色厚方向环 + 中心白圆钮 + 深蓝麦克风（设计稿 512 视口按 108/512 缩放）。
+     环外缘半径约 31.6 / 54，落在自适应图标中心安全区（33/54）内。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 环的柔和投影（矢量无 feDropShadow，用偏移低透明度环近似） -->
+    <path
+        android:pathData="M54,56.74 m-27,0 a27,27 0 1,1 54,0 a27,27 0 1,1 -54,0"
+        android:fillColor="#00000000"
+        android:strokeColor="#2E173F60"
+        android:strokeWidth="10.5" />
+    <!-- 白色厚方向环 -->
+    <path
+        android:pathData="M54,54 m-27,0 a27,27 0 1,1 54,0 a27,27 0 1,1 -54,0"
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="9.28" />
+    <!-- 中心圆钮 -->
+    <path
+        android:pathData="M54,54 m-16.45,0 a16.45,16.45 0 1,1 32.9,0 a16.45,16.45 0 1,1 -32.9,0"
+        android:fillColor="#FFFFFFFF" />
+    <!-- 麦克风胶囊 -->
+    <path
+        android:pathData="M53.99,42.19 h0.02 a3.59,3.59 0 0 1 3.59,3.59 v6.32 a3.59,3.59 0 0 1 -3.59,3.59 h-0.02 a3.59,3.59 0 0 1 -3.59,-3.59 v-6.32 a3.59,3.59 0 0 1 3.59,-3.59 z"
+        android:fillColor="#FF173F60" />
+    <!-- 麦克风托弧 -->
+    <path
+        android:pathData="M45.14,54 a8.86,8.86 0 0 0 17.72,0"
+        android:fillColor="#00000000"
+        android:strokeColor="#FF173F60"
+        android:strokeWidth="2.95"
+        android:strokeLineCap="round" />
+    <!-- 麦克风柄与底座 -->
+    <path
+        android:pathData="M54,62.86 v4.22 M50.21,67.08 h7.59"
+        android:fillColor="#00000000"
+        android:strokeColor="#FF173F60"
+        android:strokeWidth="2.95"
+        android:strokeLineCap="round" />
+    <!-- 胶囊高光 -->
+    <path
+        android:pathData="M52.52,44.72 v7.17"
+        android:fillColor="#00000000"
+        android:strokeColor="#8CFFFFFF"
+        android:strokeWidth="0.84"
+        android:strokeLineCap="round" />
+</vector>
