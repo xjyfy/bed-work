@@ -90,27 +90,29 @@ def ensure_basics(config: dict) -> dict:
     config.setdefault("slot_send_hotkey", {})
     config.setdefault("send_hotkey", {"default": ["enter"]})
     config.setdefault("download_dir", "")
-    # 权限字段迁移：老配置只有 receive_files，没有截图权限的概念。
-    # 为了升级后行为不变（原来能传文件、也能截屏），用 receive_files 作为两个子权限的默认值。
+    # 权限字段迁移：老配置只有 receive_files，没有截图与「遥控权限」的概念。
+    # 老设备原来是"能遥控、能传文件、能截屏"，所以三项都默认放开。
     for remote in config.get("remotes", []):
         remote.setdefault("receive_files", True)
-        files_default = bool(remote.get("receive_files", True))
-        remote.setdefault("perm_files", files_default)
-        remote.setdefault("perm_shot", files_default)
-        # 「所有」= 一键全开的总闸；勾上时两个子项置灰。单独关掉任一项后总闸自动落下来。
-        remote.setdefault("perm_all", bool(remote.get("perm_files")) and bool(remote.get("perm_shot")))
+        remote.setdefault("perm_files", bool(remote.get("receive_files", True)))
+        remote.setdefault("perm_shot", bool(remote.get("receive_files", True)))
+        # 「所有」= 遥控权限 + 传文件 + 截图。老设备一律按"全权"迁移，升级后行为不变。
+        remote.setdefault("perm_all", True)
     return config
 
 
-def remote_perms(remote: dict) -> tuple[bool, bool]:
-    """这台遥控器的有效权限 (可传文件, 可截屏)。「所有」勾上时两个都为真。"""
-    if remote.get("perm_all"):
-        return True, True
-    return bool(remote.get("perm_files", True)), bool(remote.get("perm_shot", True))
+def remote_perms(remote: dict) -> tuple[bool, bool, bool]:
+    """这台遥控器的有效权限 (可遥控, 可传文件, 可截屏)。
+
+    「所有」是遥控权限的总闸：勾上时三项全开；不勾「所有」时**没有任何遥控权限**，
+    只能按子项单独放开传文件 / 截屏（这两个不抢键盘焦点，待命状态也能用）。
+    """
+    control = bool(remote.get("perm_all"))
+    return control, control or bool(remote.get("perm_files")), control or bool(remote.get("perm_shot"))
 
 
 def set_remote_perms(config: dict, remote_id: str, all_on: bool, files: bool, shot: bool) -> bool:
-    """设置页勾选后落盘：总闸与两个子权限同时维护，保持 receive_files 兼容旧版。"""
+    """设置页勾选后落盘：总闸（=遥控权限）与两个子权限同时维护，保持 receive_files 兼容旧版。"""
     for r in config.get("remotes", []):
         if str(r.get("id")) != str(remote_id):
             continue

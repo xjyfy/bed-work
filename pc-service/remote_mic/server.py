@@ -73,17 +73,19 @@ STANDBY_ALLOWED_TYPES = frozenset(
 class _Client:
     __slots__ = (
         "remote_id", "name", "ws", "ip", "seq",
-        "allow_files", "allow_shot", "rx", "rx_saved", "accept_events", "tx_lock",
+        "allow_control", "allow_files", "allow_shot", "rx", "rx_saved", "accept_events", "tx_lock",
         "connected_at",
     )
 
     def __init__(self, remote_id: str, name: str, ws: ServerConnection, ip: str, seq: int,
-                 allow_files: bool = True, allow_shot: bool = True):
+                 allow_control: bool = True, allow_files: bool = True, allow_shot: bool = True):
         self.remote_id = remote_id
         self.name = name
         self.ws = ws
         self.ip = ip
         self.seq = seq
+        # 遥控权限：拿到控制权的前提。没有它只能传文件/截屏。
+        self.allow_control = allow_control
         self.allow_files = allow_files
         self.allow_shot = allow_shot
         self.rx: Optional[filex.Receiver] = None      # 手机→电脑的当前接收会话
@@ -142,25 +144,40 @@ class RemoteMicService:
         logger.info("config reloaded from disk")
         # 设置页改了权限：同步到**所有**在线客户端（不论是否持有控制权），
         # 手机端收到后立刻更新按钮可用性；重连时 auth_ok 也会带一份最新的。
+        demoted = False
         for c in self._clients_snapshot():
             remote = next((r for r in self._config.get("remotes", []) if r.get("id") == c.remote_id), None)
             if remote is None:
                 continue
-            files, shot = remote_perms(remote)
-            changed = (files != c.allow_files) or (shot != c.allow_shot)
+            control, files, shot = remote_perms(remote)
+            changed = (control != c.allow_control) or (files != c.allow_files) or (shot != c.allow_shot)
+            c.allow_control = control
             c.allow_files = files
             c.allow_shot = shot
+            if control is False and c.remote_id == self._active_id:
+                demoted = True
             if changed and self._loop is not None and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self._send_json(c, {
                         "type": "perms",
+                        "control": control,
                         "files": files,
                         "screenshot": shot,
                         "files_allowed": files,   # 旧版手机端只认这个
                     }),
                     self._loop,
                 )
-                logger.info("perms for %s -> files=%s shot=%s", c.name, files, shot)
+                logger.info("perms for %s -> control=%s files=%s shot=%s", c.name, control, files, shot)
+        if demoted:
+            # 正在控制的设备被收回遥控权限：控制权让给下一个有遥控权限的待命设备
+            with self._lock:
+                self._actioner.reset_modifiers()
+                nxt = next((c for c in self._clients if c.allow_control), None)
+                self._active_id = nxt.remote_id if nxt else None
+            self._audio.set_active(False)
+            logger.info("active remote lost control permission; active -> %s", self._active_id)
+            if self._loop is not None and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._broadcast_status(), self._loop)
 
     # ------------------------------------------------------------------ 状态
 
@@ -286,13 +303,14 @@ class RemoteMicService:
         self._conn_counts[remote_id] = reconnects + 1
         if reconnects:
             logger.info("remote reconnect #%d: %s (%s)", reconnects, device or remote.get("name"), ws.remote_address)
-        allow_files, allow_shot = remote_perms(remote)
+        allow_control, allow_files, allow_shot = remote_perms(remote)
         client = _Client(
             remote_id=remote_id,
             name=device or str(remote.get("name") or "遥控器"),
             ws=ws,
             ip=(ws.remote_address[0] if ws.remote_address else ""),
             seq=self._seq,
+            allow_control=allow_control,
             allow_files=allow_files,
             allow_shot=allow_shot,
         )
@@ -300,8 +318,16 @@ class RemoteMicService:
         with self._lock:
             self._clients.append(client)
             touch_remote(remote, device_name=client.name, ip=client.ip)
-            if self._active_id is None or not any(c.remote_id == self._active_id for c in self._clients):
+            # 控制权分配：只有「有遥控权限」的设备才能坐到控制位。
+            # - 当前没人控制 → 这台有权限就给它；
+            # - 当前控制者没有遥控权限（权限被降级）→ 有权限的新连接直接顶上来，旧的自动进待命；
+            # - 当前控制者本来就有权限 → 新来的进待命（先连优先）。
+            cur = next((c for c in self._clients if c.remote_id == self._active_id), None)
+            if client.allow_control and (cur is None or not cur.allow_control):
                 self._active_id = client.remote_id
+            elif cur is None and not client.allow_control:
+                # 全员都没有遥控权限：不设控制者，所有人都在待命
+                self._active_id = None
         self._save()
 
         active = client.remote_id == self._active_id
@@ -313,7 +339,11 @@ class RemoteMicService:
                     "computer": self._config.get("computer_name") or computer_name(),
                     "status": self._status_frame(),
                     # 这台设备在电脑端被授予的权限；手机端点按钮时据此提示/放行
-                    "perms": {"files": client.allow_files, "screenshot": client.allow_shot},
+                    "perms": {
+                        "control": client.allow_control,
+                        "files": client.allow_files,
+                        "screenshot": client.allow_shot,
+                    },
                     # 旧手机端只认这个字段，留着兼容
                     "files_allowed": client.allow_files,
                 },
@@ -342,8 +372,9 @@ class RemoteMicService:
             self._clients.remove(client)
             was_active = self._active_id == client.remote_id
             if was_active:
-                # 控制权顺延给最早连上的待命遥控器
-                self._active_id = min(self._clients, key=lambda c: c.seq).remote_id if self._clients else None
+                # 控制权顺延给最早连上的、**有遥控权限**的待命遥控器
+                candidates = [c for c in self._clients if c.allow_control]
+                self._active_id = min(candidates, key=lambda c: c.seq).remote_id if candidates else None
         # 只有当前控制者掉线才需要释放修饰键/停语音；待命遥控器掉线不该影响控制者
         if was_active:
             self._actioner.reset_modifiers()
@@ -360,17 +391,25 @@ class RemoteMicService:
 
     # ------------------------------------------------------------------ 控制权
 
-    def switch_active(self, remote_id: str) -> bool:
-        """托盘菜单调用：切换控制权。"""
+    def switch_active(self, remote_id: str) -> str:
+        """切换控制权。返回 "ok" / "offline" / "no_perm"。
+
+        目标必须在线，**并且有遥控权限**——只勾了传文件/截图的设备拿不到控制权。
+        """
         with self._lock:
-            if not self._find_client(remote_id):
-                return False
+            target = self._find_client(remote_id)
+            if target is None:
+                logger.info("switch_active ignored: %s not online", remote_id)
+                return "offline"
+            if not target.allow_control:
+                logger.info("switch_active denied: %s has no control permission", remote_id)
+                return "no_perm"
             self._active_id = remote_id
         self._actioner.reset_modifiers()
         if self._loop is not None and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._broadcast_status(), self._loop)
         logger.info("active remote switched to %s", remote_id)
-        return True
+        return "ok"
 
     def _is_active(self, client: _Client) -> bool:
         return client.remote_id == self._active_id
@@ -452,7 +491,16 @@ class RemoteMicService:
             elif mtype == "file_accept":
                 self._handle_accept(client, msg)
             elif mtype == "switch_active":
-                self.switch_active(str(msg.get("id", "")))
+                requested = str(msg.get("id", ""))
+                result = self.switch_active(requested) if requested else (
+                    "ok" if self._is_active(client) else "no_perm"
+                )
+                if result != "ok":
+                    # 让手机端知道为什么没抢到，否则只能看见"点了没反应"
+                    await self._send_json(
+                        self._current_client(client),
+                        {"type": "switch_result", "ok": False, "reason": result},
+                    )
             else:
                 logger.warning("unknown message type: %s", mtype)
         except Exception as exc:  # noqa: BLE001

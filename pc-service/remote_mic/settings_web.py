@@ -325,36 +325,37 @@ function renderRemotes() {
     const dis = all ? 'disabled' : '';
     tr.innerHTML = `<td>${esc(r.name)}</td><td class="num">${esc(r.last_ip || '—')}</td>
       <td class="num">${esc(r.added || '—')}</td>
-      <td>${r.online ? (r.active ? '控制中' : '在线·待命') : '离线'}</td>
+      <td>${r.online ? (r.active ? '控制中' : (r.perm_control ? '在线·待命' : '在线·无遥控')) : '离线'}</td>
       <td class="perms">
-        <label class="hint" title="全部授权：勾上后传文件与截图都放开"><input type="checkbox" ${all ? 'checked' : ''}
+        <label class="hint" title="遥控 + 传文件 + 截图（全权）；取消后这台设备将无法遥控电脑"><input type="checkbox" ${all ? 'checked' : ''}
           onchange="toggleRemoteAll('${esc(r.id)}', this.checked)"> 所有</label>
-        <label class="hint" title="允许这台遥控器往电脑传文件"><input type="checkbox" ${on(r.perm_files)} ${dis}
+        <label class="hint" title="只允许往电脑传文件；不占用控制权，等待状态也能用"><input type="checkbox" ${on(r.perm_files)} ${dis}
           onchange="toggleRemotePerm('${esc(r.id)}', 'files', this.checked)"> 传文件</label>
-        <label class="hint" title="允许这台遥控器抓取电脑屏幕"><input type="checkbox" ${on(r.perm_shot)} ${dis}
+        <label class="hint" title="只允许抓取电脑屏幕；不占用控制权，等待状态也能用"><input type="checkbox" ${on(r.perm_shot)} ${dis}
           onchange="toggleRemotePerm('${esc(r.id)}', 'shot', this.checked)"> 截图</label></td>
       <td style="text-align:right"><button class="danger" onclick="delRemote('${esc(r.id)}')">删除</button></td>`;
     tb.appendChild(tr);
   });
 }
 
-/** 勾选「所有」= 一键全开；取消后两个子项恢复可点，但保持各自当前值 */
+/** 勾选「所有」= 遥控 + 传文件 + 截图全开；取消后两个子项恢复可点，但此时该设备没有遥控权限 */
 async function toggleRemoteAll(id, on) {
   const r = state.remotes.find(x => x.id === id);
   if (!r) return;
   const files = on ? true : r.perm_files;
   const shot = on ? true : r.perm_shot;
-  await appRemotePerms(id, on, files, shot, on ? '已全部授权' : '已取消全部授权，可单独勾选');
+  await appRemotePerms(id, on, files, shot,
+    on ? '已授予遥控 + 传文件 + 截图' : '已收回遥控权限（传文件/截图按下面的勾选保留）');
 }
 
-/** 单独勾/取消某一项；一旦不是"两个都开"，总闸自动落下 */
+/** 单独勾/取消某一项；一旦不是"两个都开"，总闸自动落下 —— 此时该设备没有遥控权限 */
 async function toggleRemotePerm(id, which, on) {
   const r = state.remotes.find(x => x.id === id);
   if (!r) return;
   const files = which === 'files' ? on : r.perm_files;
   const shot = which === 'shot' ? on : r.perm_shot;
   const label = which === 'files' ? '传文件' : '截图';
-  await appRemotePerms(id, false, files, shot, (on ? '已允许' : '已禁止') + label);
+  await appRemotePerms(id, false, files, shot, (on ? '已允许' : '已禁止') + label + '（该设备无遥控权限）');
 }
 
 async function appRemotePerms(id, all, files, shot, tip) {
@@ -638,7 +639,7 @@ class SettingsApi:
         rows = []
         for r in self._service.config.get("remotes", []):
             rid = str(r.get("id", ""))
-            files, shot = store.remote_perms(r)
+            control, files, shot = store.remote_perms(r)
             rows.append(
                 {
                     "id": rid,
@@ -648,8 +649,9 @@ class SettingsApi:
                     "online": rid in online,
                     "active": bool(online.get(rid)),
                     "receive_files": files,
-                    # 三档权限：总闸 / 传文件 / 截图
-                    "perm_all": bool(r.get("perm_all", files and shot)),
+                    # 三档权限：总闸（=遥控权限）/ 传文件 / 截图
+                    "perm_all": control,
+                    "perm_control": control,
                     "perm_files": files,
                     "perm_shot": shot,
                 }
@@ -731,7 +733,7 @@ class SettingsApi:
         cfg = store.load_config()
         for r in cfg.get("remotes", []):
             if str(r.get("id")) == str(remote_id):
-                _, shot = store.remote_perms(r)
+                _, _, shot = store.remote_perms(r)
                 store.set_remote_perms(cfg, remote_id, False, bool(allow), shot)
         store.save_config(cfg)
         self._service.reload_config()

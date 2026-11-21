@@ -94,6 +94,11 @@ class MainActivity : AppCompatActivity() {
     private var shotPending = false
     /** 电脑端是否给这台设备开了截图权限（auth_ok / perms 帧同步）。 */
     private var shotAllowed = true
+    /** 电脑端是否给这台设备开了遥控权限（只有它才能拿到控制权）。 */
+    private var controlAllowed = true
+    /** toast 去重：同一句提示 1.5 秒内只弹一次。 */
+    private var lastToastMsg = ""
+    private var lastToastAt = 0L
 
     private val prefs by lazy { getSharedPreferences("remote_mic", MODE_PRIVATE) }
 
@@ -393,6 +398,17 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 "perms" -> applyPerms(obj, toastTip = true)
+                "switch_result" -> {
+                    if (!obj.optBoolean("ok", false)) {
+                        toast(
+                            when (obj.optString("reason")) {
+                                "no_perm" -> "权限受限，请在电脑端设置菜单授权。"
+                                "offline" -> "目标设备不在线"
+                                else -> "切换控制权失败"
+                            }
+                        )
+                    }
+                }
                 "files_allowed" -> {
                     fileTransfer.allowed = obj.optBoolean("allow", true)
                     toast(if (fileTransfer.allowed) "电脑端已允许传文件" else "电脑端已关闭文件接收")
@@ -442,11 +458,14 @@ class MainActivity : AppCompatActivity() {
         binding.tvDevice.text = device?.name ?: "未绑定设备 · 点击扫码"
         binding.statusText.text = when {
             connected && active -> "控制中"
+            // 没有遥控权限：不是「排队等控制权」，而是根本没资格，别用「待命」误导
+            connected && !controlAllowed -> "无遥控权限"
             connected -> "待命"
             else -> "未连接"
         }
         val dotColor = when {
             connected && active -> 0xFF2F9E63.toInt()
+            connected && !controlAllowed -> 0xFF9E9E9E.toInt()
             connected -> 0xFFFFA000.toInt()
             else -> 0xFF9E9E9E.toInt()
         }
@@ -734,11 +753,29 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ 发送
 
-    private fun send(type: String, vararg kv: Pair<String, Any?>) {
-        if (!connected) return
+    /** 遥控类消息：需要遥控权限、并且必须正处于「控制中」。截屏/传文件不在此列。 */
+    private val controlTypes = setOf(
+        "key", "send", "voice", "voice_toggle", "launch", "switcher", "clip", "mic"
+    )
+
+    private fun send(type: String, vararg kv: Pair<String, Any?>): Boolean {
+        if (!connected) return false
+        if (type in controlTypes) {
+            // 没有遥控权限：电脑端只给了传文件/截图，连控制权都拿不到
+            if (!controlAllowed) {
+                toast("权限受限，请在电脑端设置菜单授权。")
+                return false
+            }
+            // 有权限但正在等待控制权：明确告知，别让用户以为按键坏了
+            if (!active) {
+                toast("现在你处于等待状态，无法操作。")
+                return false
+            }
+        }
         val obj = JSONObject().put("type", type)
         kv.forEach { obj.put(it.first, it.second) }
         client.sendText(obj.toString())
+        return true
     }
 
     private fun sendHello() {
@@ -763,20 +800,25 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
-    /** 电脑端权限下发：所有 / 传文件 / 截图。旧版只发 files_allowed 时也走这里兜底。 */
+    /** 电脑端权限下发：遥控 / 传文件 / 截图。旧版只发 files_allowed 时也走这里兜底。 */
     private fun applyPerms(obj: JSONObject, toastTip: Boolean) {
         val oldFiles = fileTransfer.allowed
         val oldShot = shotAllowed
+        val oldCtrl = controlAllowed
         val perms = obj.optJSONObject("perms")
         if (perms != null) {
+            controlAllowed = perms.optBoolean("control", controlAllowed)
             fileTransfer.allowed = perms.optBoolean("files", fileTransfer.allowed)
             shotAllowed = perms.optBoolean("screenshot", shotAllowed)
         } else {
             fileTransfer.allowed = obj.optBoolean("files_allowed", fileTransfer.allowed)
         }
-        if (toastTip && (oldFiles != fileTransfer.allowed || oldShot != shotAllowed)) {
+        // 遥控权限有无会改变顶栏状态（「控制中」/「待命」/「无遥控权限」），变了就刷新
+        if (oldCtrl != controlAllowed) renderHeader()
+        if (toastTip && (oldFiles != fileTransfer.allowed || oldShot != shotAllowed || oldCtrl != controlAllowed)) {
             toast(
-                "电脑端权限已更新：传文件" + (if (fileTransfer.allowed) "可用" else "已禁止") +
+                "电脑端权限已更新：遥控" + (if (controlAllowed) "可用" else "已收回") +
+                    "，传文件" + (if (fileTransfer.allowed) "可用" else "已禁止") +
                     "，截图" + (if (shotAllowed) "可用" else "已禁止")
             )
         }
@@ -981,6 +1023,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toast(msg: String) {
+        // 同一句话 1.5 秒内不重复弹：按住说话被拦时 down/up 会各触发一次，避免刷屏
+        val now = System.currentTimeMillis()
+        if (msg == lastToastMsg && now - lastToastAt < 1500L) return
+        lastToastMsg = msg
+        lastToastAt = now
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
@@ -1351,6 +1398,15 @@ class MainActivity : AppCompatActivity() {
         // 语音：按住临时说话；快速双击常开；常开态单击结束并退出常开
         binding.btnVoice.hold(
             down = {
+                // 没有遥控权限 / 正在等待控制权：一个字都不发，也不起本地录音
+                if (!controlAllowed) {
+                    toast("权限受限，请在电脑端设置菜单授权。")
+                    return@hold
+                }
+                if (!active) {
+                    toast("现在你处于等待状态，无法操作。")
+                    return@hold
+                }
                 // 没麦克风权限就不发 voice.down、也不起录音服务，只提示。
                 // 按钮不做 isEnabled=false：那样连触摸/震动反馈都没了，用户不知道为啥按不动。
                 if (!micGranted()) {
