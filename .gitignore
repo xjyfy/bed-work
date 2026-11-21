@@ -46,3 +46,6 @@ remote-mic-app-windows/
 # release 签名私钥与凭据：绝不进公开仓库（任何人拿到都可签同包名 APK 覆盖用户安装）。
 # 换机器/换项目靠手动拷贝或私有同步整个 signing/ 目录复用。
 signing/
+
+# 手机端界面重设计的本地稿（HTML/CSS/PDF 导出）：只在本地看，不入库。
+design/app-redesign/
