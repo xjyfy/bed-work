@@ -398,6 +398,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 "perms" -> applyPerms(obj, toastTip = true)
+                "key_ignored" -> {
+                    // 电脑端把某个栏位的新会话键设成「无」：这次按键没发出去，得让用户知道
+                    if (obj.optString("code") == "new_chat") toast("该应用禁用新会话")
+                }
                 "switch_result" -> {
                     if (!obj.optBoolean("ok", false)) {
                         toast(

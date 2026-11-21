@@ -137,8 +137,8 @@ class RemoteMicService:
         except Exception as exc:  # noqa: BLE001
             logger.error("reload config failed: %s", exc)
             return
-        for key in ("apps", "send_hotkey", "slot_send_hotkey", "computer_name", "voice_hotkey", "remotes",
-                    "download_dir"):
+        for key in ("apps", "send_hotkey", "slot_send_hotkey", "slot_new_chat_hotkey", "new_chat_hotkey",
+                    "computer_name", "voice_hotkey", "remotes", "download_dir"):
             if key in fresh:
                 self._config[key] = fresh[key]
         logger.info("config reloaded from disk")
@@ -463,9 +463,15 @@ class RemoteMicService:
             # handle_clip 最多重试 120ms），放线程里跑，别卡住事件循环。
             # _handler 会 await 本次分发再读下一帧，所以同一连接的按键顺序不变。
             if mtype == "key":
-                await asyncio.to_thread(
+                ok = await asyncio.to_thread(
                     self._actioner.handle_key, msg.get("code", ""), msg.get("action", "down")
                 )
+                # 该栏位的新会话键被设成「无」：没发任何键，得回执让手机明确提示，
+                # 否则用户按了没反应会以为按钮坏了。
+                if ok is False and msg.get("code") == "new_chat":
+                    await self._send_json(
+                        client, {"type": "key_ignored", "code": "new_chat", "reason": "disabled"}
+                    )
             elif mtype == "send":
                 await asyncio.to_thread(self._actioner.handle_send)
             elif mtype == "voice":

@@ -139,6 +139,24 @@ td.perms label { display:inline-block; margin-right:10px; white-space:nowrap; cu
 td.perms input[type=checkbox] { vertical-align:-2px; margin-right:3px; }
 .icoWrap { width:20px; height:20px; display:inline-block; background:#e8eef6; border-radius:3px; flex:0 0 20px; }
 .icoWrap img { width:20px; height:20px; border-radius:3px; object-fit:contain; display:block; }
+
+/* 快捷键捕获控件：点一下进入「请按组合键」状态，再按键即写入 */
+.hkcell { display:flex; flex-direction:column; gap:6px; }
+.hkrow { display:flex; align-items:center; gap:8px; }
+.hklabel { width:48px; font-size:12px; color:var(--muted); flex:0 0 48px; }
+.hkbtn {
+  min-width:150px; text-align:left; padding:5px 10px; border:1px solid var(--line); background:#fff;
+  border-radius:6px; cursor:pointer; font:13px/1.4 ui-monospace,Consolas,monospace;
+}
+.hkbtn:hover { border-color:#9bbcf0; }
+.hkbtn.capturing { border-color:#1a73e8; background:#eef5ff; color:#1a73e8; }
+.hkbtn.none { color:#b3261e; }
+.hkreset {
+  border:1px solid var(--line); background:#fff; border-radius:6px; cursor:pointer;
+  padding:4px 7px; font-size:12px; color:var(--muted);
+}
+.hkreset:hover { border-color:#9bbcf0; color:#1a73e8; }
+.hkerr { color:#b3261e; font-size:12px; }
 </style>
 </head>
 <body>
@@ -216,7 +234,7 @@ td.perms input[type=checkbox] { vertical-align:-2px; margin-right:3px; }
 <div class="card">
   <h2>四个应用栏位</h2>
   <table>
-    <thead><tr><th style="width:64px">栏位</th><th>应用</th><th style="width:180px">发送快捷键</th><th style="width:118px"></th></tr></thead>
+    <thead><tr><th style="width:64px">栏位</th><th>应用</th><th style="width:250px">快捷键（点一下再按键）</th><th style="width:118px"></th></tr></thead>
     <tbody id="slots">
       <tr><td class="num">栏位 1</td><td><div class="appcell"><span class="icoWrap"></span><div><div class="appname">读取中…</div></div></div></td><td><span class="hint">—</span></td><td></td></tr>
       <tr><td class="num">栏位 2</td><td><div class="appcell"><span class="icoWrap"></span><div><div class="appname">读取中…</div></div></div></td><td><span class="hint">—</span></td><td></td></tr>
@@ -224,7 +242,7 @@ td.perms input[type=checkbox] { vertical-align:-2px; margin-right:3px; }
       <tr><td class="num">栏位 4</td><td><div class="appcell"><span class="icoWrap"></span><div><div class="appname">读取中…</div></div></div></td><td><span class="hint">—</span></td><td></td></tr>
     </tbody>
   </table>
-  <div class="hint" style="margin-top:10px">发送键留空=按前台程序自动匹配，匹配不到用 Enter。</div>
+  <div class="hint" style="margin-top:10px">发送键留空 = 按前台程序自动匹配，匹配不到用 Enter。新会话设为「无」= 这个应用里不发任何键，手机端会提示。</div>
 </div>
 
 <footer>
@@ -257,16 +275,11 @@ td.perms input[type=checkbox] { vertical-align:-2px; margin-right:3px; }
 
 <script>
 let state = null, apps = null, pickTarget = null, picked = null;
-// 用户在下拉框里改过、但还没保存的快捷键：重渲染时必须保留，否则"选了应用回来就丢了"
-const pendingHotkeys = {};
-
-function hotkeyOf(slot) {
-  if (pendingHotkeys[slot] !== undefined) return pendingHotkeys[slot];
-  const el = document.getElementById('hk-' + slot);
-  if (el) return el.value;
-  const s = state && state.slots.find(x => x.slot === slot);
-  return s ? s.hotkey : '';
-}
+// 用户改过、但还没保存的快捷键：重渲染（比如选完应用回来）时必须保留，否则白设。
+// send[slot] = 'ctrl+enter' | ''（空 = 回落默认）
+// newchat[slot] = { mode: 'default' | 'none' | 'custom', combo: 'ctrl+n' }
+const hkEdit = { send: {}, newchat: {} };
+let capturing = null;   // { slot, kind, btn, prev }
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -274,10 +287,123 @@ function esc(s) {
 function iconTag(icon) {
   return icon ? `<img class="icon" src="${icon}">` : `<span class="icon" style="display:inline-block;background:#e8eef6;border-radius:3px"></span>`;
 }
-function hotkeyOptions(current) {
-  const base = ['', 'enter', 'ctrl+enter'];
-  const opts = base.includes(current) ? base : base.concat([current]);
-  return opts.map(v => `<option value="${esc(v)}"${v === current ? ' selected' : ''}>${v === '' ? '无' : esc(v)}</option>`).join('');
+
+// ---------------------------------------------------------------- 快捷键捕获
+// 允许的主键：字母、数字、F1~F12、若干命名键与单字符符号。
+// 必须与服务端 _SEND_NAMED_KEYS / KeyCode.from_char 对得上，否则会出现
+// 「界面设得进去、按下却静默回落 Enter」这种极难排查的问题。
+const HK_NAMED = ['enter','space','tab','esc','backspace','up','down','left','right',
+                  'insert','delete','home','end','pageup','pagedown'];
+const HK_FN = Array.from({length:12}, (_,i) => 'f' + (i+1));
+// 这些组合会被 WebView2 / 宿主吞掉或直接关窗，捕获时明确拒绝
+const HK_BLOCKED = ['ctrl+w','ctrl+r','f12','ctrl+shift+i','ctrl+shift+j','ctrl+shift+c','alt+f4'];
+
+function keyNameOf(e) {
+  const k = e.key;
+  if (!k || k === 'Control' || k === 'Shift' || k === 'Alt' || k === 'Meta' || k === 'Unidentified') return '';
+  if (k === ' ') return 'space';
+  if (/^[a-zA-Z]$/.test(k)) return k.toLowerCase();
+  if (/^[0-9]$/.test(k)) return k;
+  if (/^F([1-9]|1[0-2])$/.test(k)) return k.toLowerCase();
+  const map = {
+    Enter:'enter', Tab:'tab', Escape:'esc', Backspace:'backspace',
+    ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right',
+    Insert:'insert', Delete:'delete', Home:'home', End:'end',
+    PageUp:'pageup', PageDown:'pagedown',
+  };
+  if (map[k]) return map[k];
+  // 单字符符号（- = [ ] ; ' , . / `）
+  if (k.length === 1) return k.toLowerCase();
+  return '';
+}
+
+function comboOf(e) {
+  const main = keyNameOf(e);
+  if (!main) return '';
+  const mods = [];
+  if (e.ctrlKey) mods.push('ctrl');
+  if (e.altKey) mods.push('alt');
+  if (e.shiftKey) mods.push('shift');
+  // 顺序固定 ctrl → alt → shift，保证显示与落盘稳定、可比对
+  return mods.concat([main]).join('+');
+}
+
+function isAllowedCombo(combo) {
+  if (!combo) return false;
+  const parts = combo.split('+');
+  const main = parts[parts.length - 1];
+  if (!(HK_NAMED.includes(main) || HK_FN.includes(main) || /^[a-z0-9]$/.test(main) || main.length === 1)) return false;
+  return !HK_BLOCKED.includes(combo);
+}
+
+function prettyCombo(combo) {
+  if (!combo) return '';
+  return combo.split('+').map(p => {
+    if (p === 'ctrl' || p === 'alt' || p === 'shift') return p[0].toUpperCase() + p.slice(1);
+    if (/^f([1-9]|1[0-2])$/.test(p)) return p.toUpperCase();
+    if (HK_NAMED.includes(p)) return p[0].toUpperCase() + p.slice(1);
+    return p.toUpperCase();
+  }).join('+');
+}
+
+function sendLabel(slot) {
+  const v = hkEdit.send[slot];
+  return v ? prettyCombo(v) : '无（回落默认）';
+}
+function newChatLabel(slot) {
+  const nc = hkEdit.newchat[slot];
+  if (!nc || nc.mode === 'default') return '默认（' + prettyCombo(state.new_chat_default || 'ctrl+n') + '）';
+  if (nc.mode === 'none') return '无（禁用）';
+  return prettyCombo(nc.combo);
+}
+
+function startCapture(slot, kind, btn) {
+  if (capturing) stopCapture(true);
+  capturing = { slot, kind, btn, prev: btn.textContent };
+  btn.classList.add('capturing');
+  btn.textContent = '请按组合键…（退格=无 / Esc=取消）';
+  btn.focus();
+  document.addEventListener('keydown', onCaptureKey, true);
+}
+
+function stopCapture(restore) {
+  if (!capturing) return;
+  document.removeEventListener('keydown', onCaptureKey, true);
+  const { slot, kind, btn, prev } = capturing;
+  capturing = null;
+  btn.classList.remove('capturing');
+  renderSlots();   // 用最新状态重绘，标签/颜色都跟着变
+  if (restore && btn.isConnected) btn.textContent = prev;
+}
+
+function onCaptureKey(e) {
+  if (!capturing) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const { slot, kind } = capturing;
+  if (e.key === 'Escape') { stopCapture(true); return; }
+  // 退格 = 无：发送键 = 不覆盖（回落），新会话键 = 该栏位禁用
+  if (e.key === 'Backspace' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    if (kind === 'send') hkEdit.send[slot] = '';
+    else hkEdit.newchat[slot] = { mode: 'none', combo: '' };
+    stopCapture(false);
+    return;
+  }
+  const combo = comboOf(e);
+  if (!combo) return;   // 只按了修饰键：等主键
+  if (!isAllowedCombo(combo)) {
+    const b = capturing.btn;
+    b.textContent = prettyCombo(combo) + ' 不可用，换一个…';
+    return;
+  }
+  if (kind === 'send') hkEdit.send[slot] = combo;
+  else hkEdit.newchat[slot] = { mode: 'custom', combo };
+  stopCapture(false);
+}
+
+function resetNewChat(slot) {
+  hkEdit.newchat[slot] = { mode: 'default', combo: '' };
+  renderSlots();
 }
 
 async function boot() {
@@ -409,16 +535,33 @@ function renderSlots() {
   const tb = document.getElementById('slots');
   tb.innerHTML = '';
   state.slots.forEach(s => {
+    // 首次渲染把已保存的配置灌进 hkEdit；之后重绘一律以 hkEdit 为准（那是用户改过的值）
+    if (hkEdit.send[s.slot] === undefined) hkEdit.send[s.slot] = s.hotkey || '';
+    if (hkEdit.newchat[s.slot] === undefined) {
+      const mode = s.new_chat_mode || 'default';
+      hkEdit.newchat[s.slot] = { mode, combo: s.new_chat_hotkey || '' };
+    }
     const tr = document.createElement('tr');
     const name = s.name || '未设置';
-    const current = hotkeyOf(s.slot);
+    const sendTxt = esc(sendLabel(s.slot));
+    const ncTxt = esc(newChatLabel(s.slot));
+    const ncNone = hkEdit.newchat[s.slot].mode === 'none';
     tr.innerHTML = `
       <td class="num">栏位 ${esc(s.slot)}</td>
       <td><div class="appcell"><span class="icoWrap" id="ico-${esc(s.slot)}">${s.icon ? `<img src="${s.icon}" alt="">` : ''}</span><div>
         <div class="appname">${esc(name)}</div>
         <div class="apppath">${esc(s.path || '')}</div>
       </div></div></td>
-      <td><select id="hk-${esc(s.slot)}" style="width:100%" onchange="pendingHotkeys['${esc(s.slot)}']=this.value">${hotkeyOptions(current)}</select></td>
+      <td><div class="hkcell">
+        <div class="hkrow"><span class="hklabel">发送</span>
+          <button type="button" class="hkbtn"
+            onclick="startCapture('${esc(s.slot)}','send',this)">${sendTxt}</button></div>
+        <div class="hkrow"><span class="hklabel">新会话</span>
+          <button type="button" class="hkbtn${ncNone ? ' none' : ''}"
+            onclick="startCapture('${esc(s.slot)}','newchat',this)">${ncTxt}</button>
+          <button type="button" class="hkreset" title="恢复默认（Ctrl+N）"
+            onclick="resetNewChat('${esc(s.slot)}')">↺</button></div>
+      </div></td>
       <td><button onclick="openPicker('${esc(s.slot)}')" style="white-space:nowrap">选择应用</button></td>`;
     tb.appendChild(tr);
   });
@@ -558,9 +701,18 @@ async function browseExe() {
 }
 
 async function saveAll(btn) {
+  if (capturing) stopCapture(true);
   const payload = {
     computer_name: document.getElementById('computerName').value.trim(),
-    slots: state.slots.map(s => ({ slot: s.slot, hotkey: hotkeyOf(s.slot) }))
+    slots: state.slots.map(s => {
+      const nc = hkEdit.newchat[s.slot] || { mode: 'default', combo: '' };
+      return {
+        slot: s.slot,
+        hotkey: hkEdit.send[s.slot] || '',
+        new_chat_mode: nc.mode || 'default',
+        new_chat_hotkey: nc.combo || ''
+      };
+    })
   };
   if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
   try {
@@ -602,10 +754,15 @@ class SettingsApi:
         """栏位信息。默认**不扫应用列表、不导出图标**，保证设置页秒开。
 
         图标由前端拿到骨架后再异步调 get_slot_icons() 补上。
+        新会话键带出 `new_chat_hotkey`（组合键字符串）与 `new_chat_mode`
+        （`default` = 未设置走默认 Ctrl+N / `none` = 该栏位禁用 / `custom` = 自定义）。
         """
         cfg = self._service.config
         apps = cfg.get("apps") or {}
         slot_hotkey = cfg.get("slot_send_hotkey") or {}
+        nc_table = cfg.get("slot_new_chat_hotkey") or {}
+        if not isinstance(nc_table, dict):
+            nc_table = {}
         if with_icons:
             applist.ensure_icons([str(p) for p in apps.values() if p])
         out = []
@@ -623,7 +780,26 @@ class SettingsApi:
             hk = slot_hotkey.get(slot) or []
             if isinstance(hk, list):
                 hk = "+".join(str(k).lower() for k in hk)
-            out.append({"slot": slot, "path": path, "name": name, "icon": icon, "hotkey": str(hk)})
+            # 新会话键：区分「未设置 / 禁用 / 自定义」三种状态
+            nc_mode, nc_hotkey = "default", ""
+            if slot in nc_table:
+                raw = nc_table.get(slot)
+                if isinstance(raw, str):
+                    nc_hotkey = raw.strip().lower()
+                elif isinstance(raw, (list, tuple)):
+                    nc_hotkey = "+".join(str(k).lower() for k in raw if str(k).strip())
+                nc_mode = "custom" if nc_hotkey else "none"
+            out.append(
+                {
+                    "slot": slot,
+                    "path": path,
+                    "name": name,
+                    "icon": icon,
+                    "hotkey": str(hk),
+                    "new_chat_hotkey": nc_hotkey,
+                    "new_chat_mode": nc_mode,
+                }
+            )
         return out
 
     def get_slot_icons(self) -> list[dict]:
@@ -660,6 +836,9 @@ class SettingsApi:
 
     def get_state(self) -> dict:
         cfg = self._service.config
+        nc_default = (cfg.get("new_chat_hotkey") or {}).get("default") or ["ctrl", "n"]
+        if isinstance(nc_default, list):
+            nc_default = "+".join(str(k).lower() for k in nc_default)
         return {
             "computer_name": str(cfg.get("computer_name") or store.computer_name()),
             "ip": store.lan_ip(),
@@ -668,6 +847,8 @@ class SettingsApi:
             "repo": REPO_URL,
             "remotes": self._remotes(),
             "slots": self._slots(),
+            # 设置页里「新会话=默认」时展示的组合键，跟服务端回落值保持一致
+            "new_chat_default": str(nc_default),
             "audio": self._service.audio_status(),
             "files": self._files_state(),
         }
@@ -827,6 +1008,7 @@ class SettingsApi:
         if name:
             cfg["computer_name"] = name
         slot_hotkey = cfg.setdefault("slot_send_hotkey", {})
+        nc_table = cfg.setdefault("slot_new_chat_hotkey", {})
         for item in payload.get("slots", []):
             slot = str(item.get("slot", ""))
             raw = str(item.get("hotkey") or "").strip().lower()
@@ -834,12 +1016,26 @@ class SettingsApi:
                 slot_hotkey[slot] = [p for p in raw.replace("+", " ").split() if p]
             else:
                 slot_hotkey.pop(slot, None)
+            # 新会话键三态：default / none（发空串，行里被 actioner 判为禁用）/ custom
+            mode = str(item.get("new_chat_mode") or "default").strip().lower()
+            combo = str(item.get("new_chat_hotkey") or "").strip().lower()
+            if mode == "none":
+                nc_table[slot] = ""
+            elif mode == "custom" and combo:
+                nc_table[slot] = [p for p in combo.replace("+", " ").split() if p]
+            else:
+                # default / 自定义但没填键：都回到"未设置"，走全局默认
+                nc_table.pop(slot, None)
         store.save_config(cfg)
         self._service.reload_config()
         # 栏位应用可能变了，把新的名称/图标推给已连的手机
         if hasattr(self._service, "push_apps"):
             self._service.push_apps()
-        logger.info("settings saved: %s", cfg.get("slot_send_hotkey"))
+        logger.info(
+            "settings saved: send=%s new_chat=%s",
+            cfg.get("slot_send_hotkey"),
+            cfg.get("slot_new_chat_hotkey"),
+        )
         return {
             "state": self.get_state(),
             "message": "已保存，电脑端已热重载",

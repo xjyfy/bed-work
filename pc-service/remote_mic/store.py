@@ -57,6 +57,9 @@ def default_config() -> dict:
         "voice_hotkey": ["ctrl", "win"],
         "send_hotkey": {"default": ["enter"]},
         "slot_send_hotkey": {},
+        # 新会话键：栏位 → 组合键（"" 表示该栏位禁用）；按前台程序匹配的表 + default
+        "slot_new_chat_hotkey": {},
+        "new_chat_hotkey": {"default": ["ctrl", "n"]},
         "remotes": [],
         "apps": {},
         # 手机传来的文件默认存这里；留空 = 系统「下载」目录
@@ -89,6 +92,9 @@ def ensure_basics(config: dict) -> dict:
     config.setdefault("remotes", [])
     config.setdefault("slot_send_hotkey", {})
     config.setdefault("send_hotkey", {"default": ["enter"]})
+    # 老配置没有新会话键字段：补空表即可，缺省行为仍是内置的 Ctrl+N，升级后不变
+    config.setdefault("slot_new_chat_hotkey", {})
+    config.setdefault("new_chat_hotkey", {"default": ["ctrl", "n"]})
     config.setdefault("download_dir", "")
     # 权限字段迁移：老配置只有 receive_files，没有截图与「遥控权限」的概念。
     # 老设备原来是"能遥控、能传文件、能截屏"，所以三项都默认放开。

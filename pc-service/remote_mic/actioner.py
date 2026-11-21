@@ -164,14 +164,28 @@ _KEY_MAP = {
     "vol_down": Key.media_volume_down,
 }
 
-# 发送快捷键里可用作键名的功能键（单字符键另行解析）
+# 快捷键里可用作键名的功能键（单字符键另行解析）。
+# 必须和设置页「按键捕获」允许的键集一一对应：捕获得到的名字在这里查不到，
+# 就会被 _resolve_spec 静默回落到默认键，表现为"设了没用"，很难排查。
 _SEND_NAMED_KEYS = {
     "enter": Key.enter,
     "space": Key.space,
     "tab": Key.tab,
     "esc": Key.esc,
     "backspace": Key.backspace,
+    "up": Key.up,
+    "down": Key.down,
+    "left": Key.left,
+    "right": Key.right,
+    "insert": Key.insert,
+    "delete": Key.delete,
+    "home": Key.home,
+    "end": Key.end,
+    "pageup": Key.page_up,
+    "pagedown": Key.page_down,
 }
+for _fkey_i in range(1, 13):
+    _SEND_NAMED_KEYS[f"f{_fkey_i}"] = getattr(Key, f"f{_fkey_i}")
 
 _MOD_MAP = {
     "ctrl": Key.ctrl,
@@ -253,11 +267,16 @@ class Actioner:
 
     # ------------------------------------------------------------------ 普通按键
 
-    def handle_key(self, code: str, action: str) -> None:
+    def handle_key(self, code: str, action: str) -> bool:
+        """返回 False 表示这条语义码被配置禁用、什么都没发（调用方据此回执给手机）。
+
+        只有 new_chat 会返回 False：某个栏位的新会话键被设成「无」时，按下不发键，
+        手机端需要明确提示「该应用禁用新会话」，否则用户会以为按钮坏了。
+        """
         with self._lock:
             if code in ("scroll_next", "scroll_prev"):
                 self.handle_scroll(code)
-                return
+                return True
 
             # 切换浮层期间，除方向 / 确认 / 取消以外的动作一律先落地并释放 Alt，
             # 避免 Alt 卡在按下态导致后续键盘异常。
@@ -272,9 +291,9 @@ class Actioner:
                     self._release(_MOD_MAP["alt"])
                     self._alt_tab_active = False
                     logger.info("switcher confirmed by unified OK key")
-                    return
+                    return True
                 self._tap(_KEY_MAP["ok"])
-                return
+                return True
 
             if code == "esc":
                 if self._alt_tab_active:
@@ -283,31 +302,31 @@ class Actioner:
                     self._release(_MOD_MAP["alt"])
                     self._alt_tab_active = False
                     logger.info("switcher cancelled by unified ESC key")
-                    return
+                    return True
                 self._tap(Key.esc)
-                return
+                return True
 
             if code == "new_chat":
-                self._combo(["ctrl"], KeyCode.from_char("n"))
-                return
+                return self.handle_new_chat()
 
             if code == "send":
                 self.handle_send()
-                return
+                return True
 
             if code == "tab_next":
                 self.cycle_tab()
-                return
+                return True
             if code in ("up", "down", "left", "right"):
                 # 切换浮层里用这四个方向键遍历窗口（Alt 保持按下）
                 self._tap(_KEY_MAP[code])
-                return
+                return True
 
             if code in _KEY_MAP:
                 self._tap(_KEY_MAP[code])
-                return
+                return True
 
             logger.warning("unknown key code: %s", code)
+            return True
 
     # ------------------------------------------------------------------ 发送
 
@@ -411,6 +430,33 @@ class Actioner:
             return KeyCode.from_char(name)
         return None
 
+    @staticmethod
+    def _split_spec(spec) -> list[str]:
+        """把配置里的快捷键统一成小写 token 列表。
+
+        兼容历史格式：字符串 `"ctrl+enter"` 与列表 `["ctrl","enter"]` 都接受。
+        返回空列表表示「没设」，由调用方决定是回落还是禁用。
+        """
+        if isinstance(spec, str):
+            return [p.lower() for p in spec.replace("+", " ").split() if p]
+        if isinstance(spec, (list, tuple)):
+            return [str(p).strip().lower() for p in spec if str(p).strip()]
+        return []
+
+    def _resolve_spec(self, spec, fallback: Key, label: str) -> tuple[list[str], Key]:
+        """解析快捷键 → (修饰键列表, 主键)。
+
+        未列出主键（或主键不认识）时告警并回落 fallback —— 与旧 send_hotkey 行为一致。
+        """
+        tokens = self._split_spec(spec)
+        mods = [t for t in tokens if t in _MOD_MAP]
+        mains = [t for t in tokens if t not in _MOD_MAP]
+        key = self._resolve_send_key(mains[0]) if mains else None
+        if key is None:
+            logger.warning("invalid %s: %s, fallback", label, tokens)
+            return [], fallback
+        return mods, key
+
     def _slot_for_exe(self, exe: str) -> str:
         """前台程序属于哪个应用栏位。
 
@@ -437,46 +483,80 @@ class Actioner:
         return ""
 
     def handle_send(self) -> None:
-        """发送键优先级：栏位自定义快捷键 → send_hotkey 按前台程序 → default。"""
-        table = self._config.get("send_hotkey") or {}
-        if not isinstance(table, dict):
-            table = {}
+        """发送键优先级：栏位自定义 → send_hotkey[前台程序] → default（缺省 Enter）。"""
         slot_table = self._config.get("slot_send_hotkey") or {}
         if not isinstance(slot_table, dict):
             slot_table = {}
+        table = self._config.get("send_hotkey") or {}
+        if not isinstance(table, dict):
+            table = {}
 
         exe = self._foreground_exe()
         slot = self._slot_for_exe(exe)
         spec = None
         if slot:
             slot_spec = slot_table.get(slot)
-            if isinstance(slot_spec, str) and slot_spec.strip():
-                spec = [p for p in slot_spec.replace("+", " ").split() if p]
-            elif isinstance(slot_spec, list) and slot_spec:
+            # 栏位项留空 = 不覆盖（继续按 exe 表查），这是历史语义，不要改成"禁用"
+            if self._split_spec(slot_spec):
                 spec = slot_spec
         if spec is None and exe:
             spec = table.get(exe)
         if spec is None:
             spec = table.get("default", ["enter"])
-        if isinstance(spec, str):
-            spec = [p for p in spec.replace("+", " ").split() if p]
-        if not isinstance(spec, list) or not spec:
-            spec = ["enter"]
 
-        mods = [str(k).lower() for k in spec if str(k).lower() in _MOD_MAP]
-        mains = [str(k) for k in spec if str(k).lower() not in _MOD_MAP]
-        key = self._resolve_send_key(mains[0]) if mains else None
-        if key is None:
-            logger.warning("invalid send_hotkey for %s: %s, fallback to Enter", exe or "?", spec)
-            key = Key.enter
-            mods = []
+        mods, key = self._resolve_spec(spec, Key.enter, "send_hotkey")
         logger.info(
             "send: exe=%s slot=%s combo=%s",
             exe or "(unknown)",
             slot or "-",
-            mods + [mains[0] if mains else "enter"],
+            mods + [str(key)],
         )
         self._combo(mods, key)
+
+    def handle_new_chat(self) -> bool:
+        """新会话键：栏位自定义 → new_chat_hotkey[前台程序] → default（缺省 Ctrl+N）。
+
+        与发送键的差别只有一处（用户明确要求）：**栏位项写成空串表示"禁用"**，
+        即「这个应用里按新会话什么都不发」，并返回 False 让调用方回执给手机端
+        （手机端 toast「该应用禁用新会话」）。栏位项不存在则照旧往下查。
+        """
+        slot_table = self._config.get("slot_new_chat_hotkey") or {}
+        if not isinstance(slot_table, dict):
+            slot_table = {}
+        table = self._config.get("new_chat_hotkey") or {}
+        if not isinstance(table, dict):
+            table = {}
+
+        exe = self._foreground_exe()
+        slot = self._slot_for_exe(exe)
+        spec = None
+        if slot and slot in slot_table:
+            raw = slot_table.get(slot)
+            if isinstance(raw, str) and not raw.strip():
+                logger.info("new chat disabled: exe=%s slot=%s", exe or "(unknown)", slot)
+                return False
+            if not self._split_spec(raw):
+                logger.info("new chat disabled: exe=%s slot=%s", exe or "(unknown)", slot)
+                return False
+            spec = raw
+        if spec is None and exe:
+            spec = table.get(exe)
+        if spec is None:
+            spec = table.get("default", ["ctrl", "n"])
+
+        if self._split_spec(spec):
+            mods, key = self._resolve_spec(spec, KeyCode.from_char("n"), "new_chat_hotkey")
+        else:
+            # 全局也留空 → 回到内置默认 Ctrl+N
+            mods, key = ["ctrl"], KeyCode.from_char("n")
+        logger.info(
+            "new chat: exe=%s slot=%s combo=%s",
+            exe or "(unknown)",
+            slot or "-",
+            mods + [str(key)],
+        )
+        self._combo(mods, key)
+        return True
 
     # ------------------------------------------------------------------ 应用启动
 
