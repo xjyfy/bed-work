@@ -27,9 +27,13 @@
         android:theme="@style/Theme.RemoteMic"
         tools:targetApi="35">
 
+        <!-- singleTask：桌面图标 / 磁贴 / 最近任务多次点开时必须复用同一个实例。
+             standard 下会一层层叠出新实例，每个实例各建一条 WebSocket，互相被服务端踢掉，
+             表现为"多次点截图就断线重连"。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -1406,6 +1406,16 @@ class MainActivity : AppCompatActivity() {
         binding.btnScrollPrev.click { send("key", "code" to "scroll_prev", "action" to "down") }
     }
 
+    /**
+     * singleTask 下从桌面图标 / 快捷开关磁贴再次点开不会新建实例，只会走到这里。
+     * 顺便探一次活，让"点开就能用"不依赖上一次连接的残余状态。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        client.wakeUp()
+    }
+
     override fun onPause() {
         stopDeleteRepeat()
         super.onPause()
