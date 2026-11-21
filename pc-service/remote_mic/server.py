@@ -52,6 +52,16 @@ logger = logging.getLogger("remote_mic")
 # 远程粘贴文本上限（字符数）。手机端先拦一次，服务端再兜一次。
 CLIP_MAX_CHARS = 100_000
 
+# 同一台遥控器「踢旧保新」时给旧连接用的 close code。手机端据此知道"是被顶掉了"，
+# 退让一段时间再重连，避免两条连接来回互踢（重连风暴）。
+REPLACED_CLOSE_CODE = 4001
+
+# 这些是「请求-回包」型消息：回包发不出去，手机端就只能干等（截屏没反应、传文件超时）。
+# 发送失败时补发一次到当前最新连接，兜住"发送前一刻被顶掉"的情况。
+RETRY_ON_REPLACED_TYPES = frozenset(
+    {"screenshot", "file_ack", "file_reject", "file_result", "file_offer"}
+)
+
 
 class _Client:
     __slots__ = (
@@ -202,10 +212,26 @@ class RemoteMicService:
         with self._lock:
             return next((c for c in self._clients if c.remote_id == remote_id), None)
 
-    async def _close_quietly(self, ws: ServerConnection, timeout: float = 1.5) -> None:
-        """带超时的关闭：死连接握手可能永远等不到回包，绝不能无限期阻塞。"""
+    async def _close_quietly(
+        self,
+        ws: ServerConnection,
+        code: int = 1000,
+        reason: str = "replaced",
+        timeout: float = 1.5,
+    ) -> None:
+        """带超时的关闭：死连接握手可能永远等不到回包，绝不能无限期阻塞。
+
+        对端不回 close 帧时优雅关闭会一直挂着（那条 socket 在两边都变成半死的
+        ESTABLISHED，服务端也收不到 FIN），所以超时后直接 abort 底层传输。
+        """
         try:
-            await asyncio.wait_for(ws.close(code=1000, reason="replaced"), timeout=timeout)
+            await asyncio.wait_for(ws.close(code=code, reason=reason), timeout=timeout)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            transport = getattr(ws, "transport", None)
+            if transport is not None:
+                transport.abort()
         except Exception:  # noqa: BLE001
             pass
 
@@ -233,7 +259,10 @@ class RemoteMicService:
             logger.info("replace stale connection of %s (%s)", c.name, c.ip)
             # 不能 await：对已失联的 socket，close() 要等完整的关闭握手（默认 10s），
             # 一旦卡在认证路径上就把整个事件循环堵住 —— 表现为 ping 不回、手机反复重连。
-            asyncio.create_task(self._close_quietly(c.ws))
+            # 用专用 code 告诉手机端"你是被顶掉的"，它收到后会退让 10 秒再重连，避免互踢。
+            asyncio.create_task(
+                self._close_quietly(c.ws, code=REPLACED_CLOSE_CODE, reason="replaced")
+            )
 
         self._seq += 1
         # B7：同一台遥控器的第几次连接（1 = 首次，>1 = 断线重连；真机杀进程后据此判断重连是否发生）
@@ -549,10 +578,26 @@ class RemoteMicService:
         return self._find_client(client.remote_id) or client
 
     async def _send_json(self, client: _Client, payload: dict) -> None:
+        text = json.dumps(payload, ensure_ascii=False)
         try:
-            await client.ws.send(json.dumps(payload, ensure_ascii=False))
+            await client.ws.send(text)
+            return
         except Exception as exc:  # noqa: BLE001
             logger.info("send failed (%s): %s", payload.get("type"), exc)
+
+        # 兜底：这条连接可能在发送前一刻被同一台遥控器的新连接顶掉了（重连期间很常见）。
+        # 对截屏、文件握手这类「请求-回包」消息，把回包补发给当前最新连接；
+        # 否则手机端永远收不到，表现为「截屏没反应」「传文件提示未连接」。
+        if payload.get("type") not in RETRY_ON_REPLACED_TYPES:
+            return
+        fresh = self._find_client(client.remote_id)
+        if fresh is None or fresh is client:
+            return
+        try:
+            await fresh.ws.send(text)
+            logger.info("send retried (%s) on current connection", payload.get("type"))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("send retry failed (%s): %s", payload.get("type"), exc)
 
     # ------------------------------------------------------------------ 文件互传
 
