@@ -1,6 +1,7 @@
 """设置页（本地弹窗）：绑定二维码、遥控器管理、四栏位应用与发送快捷键。
 
-用 tkinter 实现，独立线程里跑自己的 mainloop（pystray 占着主线程）。
+用 tkinter 实现，作为 pywebview 不可用时的回退，在工作线程里跑自己的 mainloop
+（主线程留给 pywebview；托盘已 run_detached，不占主线程）。
 所有落盘都走 store.save_config，保存后通知服务热重载，不需要重启进程。
 """
 

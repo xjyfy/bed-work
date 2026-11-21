@@ -25,7 +25,12 @@ class AudioOut:
         self._frame_ms = int(config.get("frame_ms", 20))
         self._device_keyword = config.get("audio_device_keyword", "CABLE Input")
 
+        # _lock 只保护环形缓冲与计数，**绝不能持它跨越 PortAudio 调用**：
+        # 音频回调要抢这把锁，而 stream.stop() 会等回调把缓冲放完 → 持锁关流即死锁；
+        # feed() 又跑在 asyncio 线程里，持锁开流（设备枚举可达数百毫秒）会卡死整个事件循环。
+        # 开/关流的生命周期由 _life 串行化，回调与 feed 都不碰它。
         self._lock = threading.RLock()
+        self._life = threading.Lock()
         self._active = False
         self._stream: Optional[sd.OutputStream] = None
         # 是否真正打开了虚拟声卡输出流；False 时语音应整体禁用（不得回落到物理输出设备）
@@ -127,12 +132,13 @@ class AudioOut:
         return sorted(matching, key=rank)
 
     def start(self) -> None:
-        with self._lock:
-            if self._stream is not None or self._ready:
+        with self._life:
+            if self._stream is not None:
                 return
             candidates = self._output_candidates()
             if not candidates:
-                self._ready = False
+                with self._lock:
+                    self._ready = False
                 return
             blocksize = int(self._sample_rate * self._frame_ms / 1000)
             for idx, dev, api in candidates:
@@ -150,31 +156,37 @@ class AudioOut:
                     logger.warning("device %s (%s, idx=%s) unusable: %s", dev["name"], api, idx, exc)
                     continue
                 self._stream = stream
-                self._ready = True
-                self._matched_name = str(dev["name"])
-                self._matched_hostapi = api
+                with self._lock:
+                    self._ready = True
+                    self._matched_name = str(dev["name"])
+                    self._matched_hostapi = api
                 logger.info(
                     "audio output started (sr=%s, block=%s) -> %s (%s, idx=%s)",
                     self._sample_rate, blocksize, dev["name"], api, idx,
                 )
                 return
-            self._ready = False
+            with self._lock:
+                self._ready = False
             logger.error(
                 "all %d candidate device(s) refused %s Hz; voice is disabled",
                 len(candidates), self._sample_rate,
             )
 
     def stop(self) -> None:
-        with self._lock:
-            if self._stream is not None:
+        with self._life:
+            stream = self._stream
+            self._stream = None
+            with self._lock:
+                self._ready = False
+                self._clear()
+            # 先放掉 _lock 再关流：stream.stop() 要等回调把待播缓冲放完，
+            # 而回调会抢 _lock，持锁关流就是互等（表现为退出/重探测声卡挂死）。
+            if stream is not None:
                 try:
-                    self._stream.stop()
-                    self._stream.close()
+                    stream.stop()
+                    stream.close()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("close stream failed: %s", exc)
-                self._stream = None
-            self._ready = False
-            self._clear()
 
     # ------------------------------------------------------------------ 缓冲
 
@@ -195,6 +207,10 @@ class AudioOut:
         # 声卡未就绪时直接丢帧：宁可没有声音，也不能把语音从物理扬声器放出来
         if not self._active or not self._ready or not pcm:
             return
+        # 奇数长度字节会让 frombuffer 抛 ValueError，冒泡到 server 会断掉整条
+        # WebSocket 连接；截到偶数字节（丢弃末尾半个样本）比断连代价小得多。
+        if len(pcm) % 2:
+            pcm = pcm[:-1]
         samples = np.frombuffer(pcm, dtype=np.int16)
         with self._lock:
             cap = len(self._buf)

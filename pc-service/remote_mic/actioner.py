@@ -98,6 +98,9 @@ _SM_XVIRTUALSCREEN = 76
 _SM_YVIRTUALSCREEN = 77
 _SM_CXVIRTUALSCREEN = 78
 _SM_CYVIRTUALSCREEN = 79
+# QueryFullProcessImageNameW 的缓冲：WindowsApps 深路径远超 MAX_PATH(260)，
+# 缓冲不足会取不到进程名 → UWP 栏位匹配 / send_hotkey 查表静默落空。取 NT 路径上限。
+_IMAGE_NAME_BUF = 32768
 
 user32.EnumWindows.argtypes = [_ENUM_WINDOWS_PROC, wintypes.LPARAM]
 user32.EnumChildWindows.argtypes = [wintypes.HWND, _ENUM_WINDOWS_PROC, wintypes.LPARAM]
@@ -326,8 +329,8 @@ class Actioner:
         if not hproc:
             return "", ""
         try:
-            buf = ctypes.create_unicode_buffer(260)
-            size = wintypes.DWORD(260)
+            buf = ctypes.create_unicode_buffer(_IMAGE_NAME_BUF)
+            size = wintypes.DWORD(_IMAGE_NAME_BUF)
             if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
                 path = buf.value
                 return os.path.basename(path).lower(), path
@@ -500,8 +503,8 @@ class Actioner:
             if not hproc:
                 return True
             try:
-                buf = ctypes.create_unicode_buffer(260)
-                size = wintypes.DWORD(260)
+                buf = ctypes.create_unicode_buffer(_IMAGE_NAME_BUF)
+                size = wintypes.DWORD(_IMAGE_NAME_BUF)
                 if not kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
                     return True
                 if os.path.basename(buf.value).lower() != target:
@@ -789,10 +792,12 @@ class Actioner:
             if os.path.exists(path):
                 os.startfile(path)  # type: ignore[attr-defined]
             else:
-                # shell=True 会先起一个 cmd.exe；本进程无控制台时会多闪一个黑框，故显式隐藏
+                # 不经 cmd.exe：shell=True 会把路径里的 & ^ 等当元字符解释。
+                # 直接把命令行字符串交给 CreateProcess，它自己解析带引号的 exe 与参数
+                # （配置值可能是 `"C:\...\DeepSeek Harness.exe" --flag` 这类命令行）。
+                # CREATE_NO_WINDOW 必须保留：打包后是 GUI 子系统，不带它子进程会闪黑框。
                 subprocess.Popen(
                     path,
-                    shell=True,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             logger.info("launched slot %s: %s", slot, path)

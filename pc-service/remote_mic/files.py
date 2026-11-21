@@ -28,6 +28,9 @@ MAGIC = b"FCHN"                           # 文件块的二进制帧前缀，用
 # FOLDERID_Downloads = {374DE290-123F-4565-9164-39C4925E467B}
 _FOLDERID_DOWNLOADS = "{374DE290-123F-4565-9164-39C4925E467B}"
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# transfer_id 会拼进 `.part` 文件名，必须和文件名一样清洗：
+# 带 `..` / 分隔符的 tid 能让落盘路径逃出接收目录（覆盖甚至删除任意文件）。
+_TID_OK = re.compile(r"[0-9A-Za-z_-]{1,64}")
 _RESERVED = {
     "con", "prn", "aux", "nul",
     *(f"com{i}" for i in range(1, 10)),
@@ -82,9 +85,11 @@ def sanitize_name(name: str, fallback_ext: str = "") -> str:
     base = _BAD_CHARS.sub("_", base).strip(" .")
     if not base:
         base = "文件" + (fallback_ext if fallback_ext.startswith(".") else "")
+    # Windows 把「首个点之前的整段」当设备名，nul.a.b 照样是 NUL 设备，
+    # 所以不能只看 splitext 的 stem。
+    if base.split(".", 1)[0].lower() in _RESERVED:
+        base = "_" + base
     stem, ext = os.path.splitext(base)
-    if stem.lower() in _RESERVED:
-        stem = "_" + stem
     if len(stem) > 120:
         stem = stem[:120]
     if len(ext) > 20:
@@ -92,24 +97,43 @@ def sanitize_name(name: str, fallback_ext: str = "") -> str:
     return stem + ext
 
 
-def unique_path(folder: Path, name: str) -> Path:
-    """同名不覆盖：`a.jpg` → `a (1).jpg`。"""
-    candidate = folder / name
-    if not candidate.exists():
-        return candidate
+def sanitize_transfer_id(tid: str) -> str:
+    """客户端给的 transfer_id 只允许字母数字下划线连字符；不合格就服务端自生成。
+
+    正常的手机端 tid 是 `u<hex>`、电脑端是 uuid hex，都落在白名单里，
+    所以这条只拦手改包/异常客户端，不影响正常传输。
+    """
+    text = str(tid or "")
+    return text if _TID_OK.fullmatch(text) else uuid.uuid4().hex[:12]
+
+
+def place_unique(part: Path, folder: Path, name: str) -> Path:
+    """把 `.part` 改名成正式名，同名自动加 ` (1)`，**绝不覆盖已有文件**。
+
+    不能「先 exists() 挑名、再 replace()」：两步之间有竞态，并发同名传输会
+    互相覆盖；而且 Windows 上 `Path.replace` 本身就会覆盖目标。
+    `os.rename` 在目标已存在时抛 FileExistsError，据此逐个试候选名，
+    每次尝试自身是原子的。（本项目只跑 Windows；POSIX 的 rename 会静默覆盖。）
+    """
     stem, ext = os.path.splitext(name)
-    for i in range(1, 1000):
-        candidate = folder / f"{stem} ({i}){ext}"
-        if not candidate.exists():
-            return candidate
-    return folder / f"{stem} ({uuid.uuid4().hex[:6]}){ext}"
+    candidates = [name]
+    candidates.extend(f"{stem} ({i}){ext}" for i in range(1, 1000))
+    candidates.append(f"{stem} ({uuid.uuid4().hex[:6]}){ext}")
+    for cand in candidates:
+        target = folder / cand
+        try:
+            os.rename(part, target)
+            return target
+        except FileExistsError:
+            continue
+    raise ValueError(f"接收目录里同名文件过多，无法保存 {name}")
 
 
 class Receiver:
     """一次手机→电脑的接收会话：边写边统计，收完 rename，失败就删。"""
 
     def __init__(self, folder: Path, name: str, size: int, transfer_id: str = ""):
-        self.transfer_id = transfer_id or uuid.uuid4().hex[:12]
+        self.transfer_id = sanitize_transfer_id(transfer_id)
         self.folder = folder
         self.size = int(size or 0)
         self.name = sanitize_name(name)
@@ -120,18 +144,21 @@ class Receiver:
         self._fh = open(self.part_path, "wb")
 
     def write(self, data: bytes) -> None:
-        if self.received + len(data) > MAX_FILE_BYTES:
+        nxt = self.received + len(data)
+        if nxt > MAX_FILE_BYTES:
             raise ValueError("文件超过 2GB 上限")
+        # 声明了大小就不许超：否则谎报一个小 size 也能一直写到 2GB 才失败
+        if self.size and nxt > self.size:
+            raise ValueError(f"收到的数据超过声明大小（{nxt} > {self.size} 字节）")
         self._fh.write(data)
-        self.received += len(data)
+        self.received = nxt
 
     def finish(self) -> Path:
         self._fh.close()
         if self.size and self.received != self.size:
             self.abort()
             raise ValueError(f"大小不符：收到 {self.received} / 应为 {self.size}")
-        final = unique_path(self.folder, self.name)
-        self.part_path.replace(final)
+        final = place_unique(self.part_path, self.folder, self.name)
         self.final_path = final
         elapsed = max(0.001, time.monotonic() - self.started)
         logger.info(

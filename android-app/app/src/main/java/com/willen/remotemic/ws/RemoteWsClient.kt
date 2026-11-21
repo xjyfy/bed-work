@@ -33,16 +33,17 @@ class RemoteWsClient(private val listener: Listener) {
         fun onBinary(bytes: ByteArray) {}
     }
 
-    private val client = OkHttpClient.Builder()
-        .pingInterval(10, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    // 全进程共用一个 OkHttpClient：每个实例自带独立的线程池与连接池，close() 只关 socket
+    // 不会释放它们；切换设备时每次新建就会不断累积线程/连接。配置与原来完全一致。
+    private val client = sharedClient
 
-    private var ws: WebSocket? = null
-    private var stopped = false
-    private var currentUrl: String? = null
-    private var token: String = ""
-    private var device: String = ""
+    // 这几个字段在 OkHttp 回调线程与主线程之间读写（webSocket !== ws 的身份判重尤其敏感），
+    // 不加 @Volatile 会读到旧值，导致旧 socket 的回调被当成当前连接处理。
+    @Volatile private var ws: WebSocket? = null
+    @Volatile private var stopped = false
+    @Volatile private var currentUrl: String? = null
+    @Volatile private var token: String = ""
+    @Volatile private var device: String = ""
 
     @Volatile private var ready = false
     @Volatile private var lastRxAt = 0L
@@ -90,8 +91,10 @@ class RemoteWsClient(private val listener: Listener) {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (webSocket !== ws) return
                 lastRxAt = System.currentTimeMillis()
-                Log.i(TAG, "ws message: $text")
                 val obj = runCatching { JSONObject(text) }.getOrNull()
+                // 只打类型和长度：截屏帧的 base64 有几百 KB、apps 帧带 4 个图标，
+                // 全文进 logcat 会瞬间刷爆缓冲区，也把画面内容泄进了日志。
+                Log.i(TAG, "ws message: type=${obj?.optString("type") ?: "?"} len=${text.length}")
                 when (obj?.optString("type")) {
                     "auth_ok" -> {
                         ready = true
@@ -168,6 +171,9 @@ class RemoteWsClient(private val listener: Listener) {
 
     fun sendText(json: String): Boolean = ws?.send(json) ?: false
 
+    /** 待发送队列的字节数。OkHttp 的队列无上限，发送侧据此做背压，避免大文件把内存堆爆。 */
+    fun queueSize(): Long = ws?.queueSize() ?: 0L
+
     fun sendBinary(bytes: ByteArray): Boolean {
         val buffer = Buffer().write(bytes)
         return ws?.send(buffer.readByteString()) ?: false
@@ -185,5 +191,13 @@ class RemoteWsClient(private val listener: Listener) {
         private const val TAG = "RemoteWsClient"
         private const val RECONNECT_DELAY_MS = 3000L
         private const val PROBE_TIMEOUT_MS = 3000L
+
+        /** 见 [client]：所有 RemoteWsClient 实例共用，空闲线程/连接由 OkHttp 自己按超时回收。 */
+        private val sharedClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .pingInterval(10, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+        }
     }
 }

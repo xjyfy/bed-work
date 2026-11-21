@@ -39,33 +39,56 @@ class Tray:
         self._icon: Optional[Icon] = None
         self._status = "未连接"
         self._remotes: list[tuple[str, str, bool]] = []  # (id, name, active)
+        # 托盘状态由 asyncio 线程（连接变化）和托盘线程（菜单点击）共同改写，
+        # 而 pystray 的 _update_menu 会在**调用线程**上 DestroyMenu/重建 HMENU。
+        # 不串行化就可能出现两个线程同时销毁/创建同一个菜单句柄。
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ 状态
 
-    def set_status(self, status: str) -> None:
-        self._status = status
-        if self._icon is not None:
-            self._icon.title = f"手机遥控麦 - {status}"
-            green = "#4CAF50" if self._remotes else "#9E9E9E"
-            if self._remotes and not any(r[2] for r in self._remotes):
-                green = "#FFA000"
-            self._icon.icon = _make_icon_image(green)
+    def set_state(self, remotes: list[tuple[str, str, bool]], status: str) -> None:
+        """一次性更新遥控器列表与状态文字，只重建一次菜单。
+
+        分开调 set_remotes + set_status 会连着重建两次菜单，把跨线程 GDI
+        竞态的窗口放大一倍；连接状态变化时这两者总是一起变。
+        """
+        with self._lock:
+            self._remotes = self._dedup(remotes)
+            self._status = status
+            self._apply_icon()
             self._refresh_menu()
+
+    def set_status(self, status: str) -> None:
+        with self._lock:
+            self._status = status
+            self._apply_icon()
+            self._refresh_menu()
+
+    def _apply_icon(self) -> None:
+        if self._icon is None:
+            return
+        self._icon.title = f"手机遥控麦 - {self._status}"
+        color = "#4CAF50" if self._remotes else "#9E9E9E"
+        if self._remotes and not any(r[2] for r in self._remotes):
+            color = "#FFA000"
+        self._icon.icon = _make_icon_image(color)
 
     def set_transfer(self, text: str = "") -> None:
         """把传输进度写进托盘 tooltip；空串恢复连接状态。
 
         Windows 托盘 tooltip 上限 63 字符，超了会被截断甚至不刷新，这里主动裁。
         """
-        if self._icon is None:
-            return
-        try:
-            base = f"手机遥控麦 - {self._status}"
-            self._icon.title = (f"{base} · {text}" if text else base)[:63]
-        except Exception:  # noqa: BLE001 - tooltip 更新失败不能拖垮传输
-            logger.debug("tray title update failed", exc_info=True)
+        with self._lock:
+            if self._icon is None:
+                return
+            try:
+                base = f"手机遥控麦 - {self._status}"
+                self._icon.title = (f"{base} · {text}" if text else base)[:63]
+            except Exception:  # noqa: BLE001 - tooltip 更新失败不能拖垮传输
+                logger.debug("tray title update failed", exc_info=True)
 
-    def set_remotes(self, remotes: list[tuple[str, str, bool]]) -> None:
+    @staticmethod
+    def _dedup(remotes: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
         # 同一 remote_id 只保留一条（防御服务端重复连接残留）
         seen: dict[str, tuple[str, str, bool]] = {}
         for rid, name, active in remotes:
@@ -73,23 +96,30 @@ class Tray:
                 seen[rid] = (rid, name, seen[rid][2] or active)
             else:
                 seen[rid] = (rid, name, active)
-        self._remotes = list(seen.values())
-        self._refresh_menu()
+        return list(seen.values())
+
+    def set_remotes(self, remotes: list[tuple[str, str, bool]]) -> None:
+        with self._lock:
+            self._remotes = self._dedup(remotes)
+            self._refresh_menu()
 
     def notify(self, message: str, title: str = "手机遥控麦") -> None:
         """托盘气泡提示（远程粘贴写剪贴板失败时用）。"""
-        if self._icon is None:
+        with self._lock:
+            icon = self._icon
+        if icon is None:
             logger.warning("tray not ready, drop notification: %s", message)
             return
         try:
-            self._icon.notify(message, title)
+            icon.notify(message, title)
         except Exception:  # noqa: BLE001 - 通知失败不能拖垮服务线程
             logger.exception("tray notify failed")
 
     def _refresh_menu(self) -> None:
-        if self._icon is not None:
-            self._icon.menu = self._menu()
-            self._icon.update_menu()
+        with self._lock:
+            if self._icon is not None:
+                self._icon.menu = self._menu()
+                self._icon.update_menu()
 
     # ------------------------------------------------------------------ 菜单
 
@@ -152,16 +182,21 @@ class Tray:
     # ------------------------------------------------------------------ 运行
 
     def run(self) -> None:
-        self._icon = Icon("remote-mic", _make_icon_image("#9E9E9E"), "手机遥控麦", menu=self._menu())
-        self._icon.title = "手机遥控麦 - 未连接"
+        with self._lock:
+            self._icon = Icon("remote-mic", _make_icon_image("#9E9E9E"), "手机遥控麦", menu=self._menu())
+            self._icon.title = "手机遥控麦 - 未连接"
         self._icon.run()
 
     def run_detached(self) -> None:
         """在后台线程跑托盘，把主线程让给 pywebview 的设置窗口。"""
-        self._icon = Icon("remote-mic", _make_icon_image("#9E9E9E"), "手机遥控麦", menu=self._menu())
-        self._icon.title = "手机遥控麦 - 未连接"
-        self._icon.run_detached()
+        with self._lock:
+            self._icon = Icon("remote-mic", _make_icon_image("#9E9E9E"), "手机遥控麦", menu=self._menu())
+            self._icon.title = "手机遥控麦 - 未连接"
+            icon = self._icon
+        icon.run_detached()
 
     def stop(self) -> None:
-        if self._icon is not None:
-            self._icon.stop()
+        with self._lock:
+            icon = self._icon
+        if icon is not None:
+            icon.stop()

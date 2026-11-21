@@ -12,7 +12,7 @@
 ; 2026-11-20 修复（"安装失败。已为系统安装 Microsoft Edge Webview2 Runtime."）：
 ;   1. WebView2 检测漏判 —— 机器级安装的注册表键在 32 位视图（WOW6432Node），
 ;      原写法只查 HKLM（64 位模式下被重定向到 64 位视图），所以判成"没装"→ 仍去跑引导器；
-;      现改为 HKLM64 + HKLM32 + HKCU 三处都查，再加文件路径兜底。
+;      现改为 HKLM64 + HKLM32 + HKCU 三处都查，并按 pv 值非空判断（别把卸载残留的空键当已装）。
 ;   2. WebView2 引导器在"已安装"时会自己弹框并返回非 0，Inno 的 [Run] 见到非 0 就判定安装失败并回滚。
 ;      → 把 WebView2 / VB-CABLE / netsh 三步从 [Run] 移到 [Code]，用 Exec 忽略返回码，
 ;        失败只做提示，绝不让整个安装失败（netsh 删除不存在规则本来就会返回 1，同理）。
@@ -26,7 +26,7 @@
 ;     装完后由 [Run] 重新拉起（自启项不变）。用户不再需要手动退托盘。
 
 #define AppName "手机遥控麦"
-#define AppVersion "1.0.3"
+#define AppVersion "1.1.0"
 #define AppExe "RemoteMicService.exe"
 
 [Setup]
@@ -74,7 +74,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; 前置组件（WebView2 / VB-CABLE / 防火墙）在 [Code] 的 InstallPrerequisites 里执行，
 ; 因为这三步的工具在"已完成/规则不存在"时会返回非 0，放在 [Run] 会让安装整体失败并回滚。
 ; 这里只保留最后的启动入口。
-Filename: "{app}\{#AppExe}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+; runasoriginaluser：安装器以管理员令牌运行，若 UAC 是用另一个管理员账户授权的，
+; 不加此 flag 服务会落到那个账户的 profile（config / HKCU 自启都写错地方）。
+Filename: "{app}\{#AppExe}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#AppExe} /F"; Flags: runhidden waituntilterminated; RunOnceId: "KillService"

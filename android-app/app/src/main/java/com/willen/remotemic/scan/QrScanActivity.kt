@@ -162,7 +162,9 @@ class QrScanActivity : AppCompatActivity() {
             if (!handled) {
                 val text = decode(proxy)
                 if (!text.isNullOrBlank()) {
-                    Log.i(TAG, "decoded: $text")
+                    // 二维码里含绑定 token，绝不能进日志（logcat 可被任意 adb 读走）。
+                    // 只记"解出来了、多长"，足够排查扫码问题。
+                    Log.i(TAG, "qr decoded, len=${text.length}")
                     runOnUiThread { onFound(text) }
                 }
             }

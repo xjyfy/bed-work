@@ -7,6 +7,8 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
+import android.widget.Toast
 import com.willen.remotemic.R
 import com.willen.remotemic.audio.AudioBus
 import com.willen.remotemic.audio.AudioRecorder
@@ -41,7 +43,19 @@ class RecorderService : Service() {
         if (recorder == null) {
             recorder = AudioRecorder { pcm -> AudioBus.onPcm?.invoke(pcm) }
         }
-        recorder?.start()
+        // start() 会因权限被拒 / 麦克风被占用而失败（返回 false 或抛异常）。
+        // 失败就必须把前台服务停掉：否则通知栏一直写着"正在录音"，实际一个字节都没采到。
+        val started = runCatching { recorder?.start() == true }.getOrDefault(false)
+        if (!started) {
+            Log.e(TAG, "recorder start failed, stop service")
+            runCatching { recorder?.stop() }
+            recorder = null
+            Toast.makeText(this, "麦克风启动失败：请检查录音权限，或是否被其他应用占用", Toast.LENGTH_LONG).show()
+            // 通知界面复位语音按钮/波形，不然会一直显示"说话中"
+            sendBroadcast(Intent(ACTION_START_FAILED).setPackage(packageName))
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     private fun stopRecording() {
@@ -72,6 +86,9 @@ class RecorderService : Service() {
     companion object {
         const val ACTION_START = "com.willen.remotemic.START_RECORD"
         const val ACTION_STOP = "com.willen.remotemic.STOP_RECORD"
+        /** 麦克风起不来时发给界面（只在本应用内），让语音按钮/波形立刻复位。 */
+        const val ACTION_START_FAILED = "com.willen.remotemic.RECORD_START_FAILED"
+        private const val TAG = "RecorderService"
         private const val CHANNEL_ID = "recorder_channel"
         private const val NOTIF_ID = 1001
     }

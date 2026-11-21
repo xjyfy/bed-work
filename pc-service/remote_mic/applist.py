@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 import winreg
 from typing import Optional
 
@@ -496,11 +497,23 @@ foreach ($p in $pairs.pairs) {
 """
 
 
+# 已经尝试导出过图标的商店应用 AUMID。导出失败也要记：否则 missing_icons 永远报缺，
+# _refresh_icons_async → push_apps → _refresh_icons_async 会无限起线程。
+_UWP_TRIED: set[str] = set()
+
+
 def missing_icons(exes: list[str]) -> bool:
-    """有任何一个需要图标的可执行文件还没有缓存 PNG。"""
+    """有任何一个需要图标的栏位应用还没有缓存 PNG（含商店应用）。"""
     for exe in exes:
         path = str(exe or "")
-        if not path or path.startswith("uwp:") or not os.path.exists(path):
+        if not path:
+            continue
+        if path.startswith("uwp:"):
+            aumid = path[4:]
+            if aumid not in _UWP_TRIED and not os.path.exists(_uwp_icon_path(aumid)):
+                return True
+            continue
+        if not os.path.exists(path):
             continue
         if not os.path.exists(_icon_path(path)):
             return True
@@ -508,17 +521,32 @@ def missing_icons(exes: list[str]) -> bool:
 
 
 def ensure_icons(exes: list[str]) -> None:
-    """批量把 exe 关联图标导出为 256px PNG（有缓存则跳过）。"""
+    """批量导出图标缓存：exe 走 Shell 256px PNG，商店应用走 AppxManifest Logo。
+
+    **只能在后台线程调用**——两条路径都会起 PowerShell。
+    """
+    for e in exes:
+        if not e or not e.startswith("uwp:"):
+            continue
+        aumid = e[4:]
+        if aumid in _UWP_TRIED:
+            continue
+        _UWP_TRIED.add(aumid)
+        try:
+            _ensure_uwp_icon(aumid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("export uwp icon failed for %s: %s", aumid, exc)
+
     todo = [e for e in exes if e and not e.startswith("uwp:") and os.path.exists(e) and not os.path.exists(_icon_path(e))]
     if not todo:
         return
     payload = {"pairs": [[e, _icon_path(e)] for e in todo]}
     work_dir = icon_cache_dir()
-    tmp_json = os.path.join(work_dir, "_icons_request.json")
+    tmp_json = os.path.join(work_dir, f"_icons_request_{uuid.uuid4().hex[:8]}.json")
     with open(tmp_json, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False)
 
-    script_path = os.path.join(work_dir, "_icons_export.ps1")
+    script_path = os.path.join(work_dir, f"_icons_export_{uuid.uuid4().hex[:8]}.ps1")
     with open(script_path, "w", encoding="utf-8-sig") as fh:
         fh.write(_ICON_PS1.replace("__JSON__", tmp_json.replace("'", "''")))
 
@@ -559,18 +587,20 @@ def _ensure_uwp_icon(aumid: str) -> None:
         " if ($src) { Add-Type -AssemblyName System.Drawing;"
         "  $img = [System.Drawing.Image]::FromFile($src);"
         "  $img.Save($out, [System.Drawing.Imaging.ImageFormat]::Png); $img.Dispose() } }"
-    ) % (family, target.replace("'", "''"))
+    ) % (family.replace("'", "''"), target.replace("'", "''"))
     _run_pwsh(script)
 
 
 def icon_data_url(exe: str) -> str:
+    """只读缓存 PNG，**不触发导出**。
+
+    导出会起 PowerShell（商店应用那条尤其慢），而本函数被 `_apps_frame()` 在
+    asyncio 认证路径上调用，一导出就把整个事件循环堵住。缓存缺失先返回空串，
+    由 `ensure_icons()` 在后台线程补齐后重推一帧 apps。
+    """
     if not exe:
         return ""
-    if exe.startswith("uwp:"):
-        _ensure_uwp_icon(exe[4:])
-        path = _uwp_icon_path(exe[4:])
-    else:
-        path = _icon_path(exe)
+    path = _uwp_icon_path(exe[4:]) if exe.startswith("uwp:") else _icon_path(exe)
     if not os.path.exists(path):
         return ""
     try:
@@ -587,7 +617,7 @@ def _exe_meta(exes: list[str]) -> dict[str, dict]:
     uniq = sorted({e for e in exes if e and not e.startswith("uwp:") and os.path.exists(e)})
     if not uniq:
         return {}
-    tmp_json = os.path.join(icon_cache_dir(), "_meta_request.json")
+    tmp_json = os.path.join(icon_cache_dir(), f"_meta_request_{uuid.uuid4().hex[:8]}.json")
     with open(tmp_json, "w", encoding="utf-8") as fh:
         json.dump(uniq, fh, ensure_ascii=False)
     script = (

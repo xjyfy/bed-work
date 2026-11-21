@@ -1,17 +1,22 @@
 package com.willen.remotemic.transfer
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.willen.remotemic.ws.RemoteWsClient
 import org.json.JSONObject
 import java.io.File
 import java.io.OutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -41,6 +46,18 @@ class FileTransferManager(
         const val MAX_COUNT = 50
         private const val TAG = "FileTransfer"
         private const val SUB_DIR = "RemoteMic"
+
+        /** 等电脑端 file_ack / file_reject 的上限。 */
+        private const val ACK_TIMEOUT_MS = 10_000L
+
+        /** 发送队列水位上限（约 8 个块）；超过就等电脑端消费，别在内存里无限堆。 */
+        private const val MAX_QUEUE_BYTES = 2L * 1024 * 1024
+
+        /** 队列持续不回落就判停滞，避免连接已死时死等。 */
+        private const val STALL_TIMEOUT_MS = 30_000L
+
+        private val RESERVED = setOf("con", "prn", "aux", "nul") +
+            (1..9).map { "com$it" } + (1..9).map { "lpt$it" }
     }
 
     /** 电脑端是否允许这台遥控器传文件（auth_ok 与 files_allowed 帧同步过来）。 */
@@ -59,6 +76,15 @@ class FileTransferManager(
         var done = 0L
         var failed = false
     }
+
+    /** 发送握手闸门：电脑端回 file_ack 才推块，回 file_reject 就立刻停。 */
+    private class SendAck(val tid: String) {
+        val latch = CountDownLatch(1)
+        @Volatile var rejected: String? = null
+    }
+
+    @Volatile
+    private var sendAck: SendAck? = null
 
     @Volatile
     private var receive: ReceiveSession? = null
@@ -94,6 +120,7 @@ class FileTransferManager(
         for ((idx, uri) in uris.withIndex()) {
             if (cancelFlag) break
             val meta = queryMeta(uri)
+            if (cancelFlag) break
             if (meta.second > MAX_FILE_BYTES) {
                 failure = "${meta.first} 超过 2GB 上限"
                 break
@@ -103,6 +130,8 @@ class FileTransferManager(
                 break
             }
             val tid = "u" + System.nanoTime().toString(16)
+            val ack = SendAck(tid)
+            sendAck = ack
             client.sendText(
                 JSONObject()
                     .put("type", "file_begin").put("transfer_id", tid)
@@ -110,6 +139,28 @@ class FileTransferManager(
                     .put("mime", meta.third).put("index", idx + 1).put("count", total)
                     .toString()
             )
+            // 必须等电脑端表态再推块：开关关了 / 超 2GB / 超 50 个都会回 file_reject，
+            // 不等就会把整个文件白推一遍，还把它算进「发送完成」。
+            val answered = runCatching { ack.latch.await(ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
+                .getOrDefault(false)
+            sendAck = null
+            if (cancelFlag) {
+                client.sendText(JSONObject().put("type", "file_abort").put("transfer_id", tid)
+                    .put("reason", "手机取消").toString())
+                break
+            }
+            if (!answered) {
+                // 电脑端可能已经建好 .part 在等块，告诉它别等了
+                client.sendText(JSONObject().put("type", "file_abort").put("transfer_id", tid)
+                    .put("reason", "等待回应超时").toString())
+                failure = "电脑端没有回应 ${meta.first}"
+                break
+            }
+            val rejected = ack.rejected
+            if (rejected != null) {
+                failure = rejected
+                break
+            }
             val buffer = ByteArray(CHUNK + 4)
             buffer[0] = 'F'.code.toByte(); buffer[1] = 'C'.code.toByte()
             buffer[2] = 'H'.code.toByte(); buffer[3] = 'N'.code.toByte()
@@ -121,6 +172,11 @@ class FileTransferManager(
                         val n = input.read(buffer, 4, CHUNK)
                         if (n <= 0) break
                         val payload = if (n == CHUNK) buffer else buffer.copyOf(n + 4)
+                        if (!awaitQueueRoom()) {
+                            ok = false
+                            if (!cancelFlag) failure = "电脑端接收停滞，已停止发送"
+                            break
+                        }
                         if (!client.sendBinary(payload)) {
                             ok = false
                             failure = "连接已断开"
@@ -184,11 +240,31 @@ class FileTransferManager(
         sendingCount = 0
     }
 
+    /** 等发送队列回落到水位以下；取消或长时间停滞返回 false。 */
+    private fun awaitQueueRoom(): Boolean {
+        val deadline = System.currentTimeMillis() + STALL_TIMEOUT_MS
+        while (client.queueSize() > MAX_QUEUE_BYTES) {
+            if (cancelFlag) return false
+            if (System.currentTimeMillis() > deadline) return false
+            try {
+                Thread.sleep(20)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        return true
+    }
+
     fun cancel() {
         cancelFlag = true
+        // 放行正在等握手的发送线程，别让它白等 10 秒
+        sendAck?.latch?.countDown()
         val rx = receive
         if (rx != null) {
             receive = null
+            // 必须告诉电脑端停发：只清本地的话它会继续把整个文件推完并报成功
+            client.sendText(JSONObject().put("type", "file_end").put("transfer_id", rx.transferId)
+                .put("ok", false).put("reason", "手机取消接收").toString())
             finishReceive(rx, ok = false, reason = "已取消")
         }
     }
@@ -211,10 +287,24 @@ class FileTransferManager(
                 receive = null
                 finishReceive(rx, ok = obj.optBoolean("ok", true), reason = obj.optString("reason"))
             }
+            "file_ack" -> {
+                val gate = sendAck
+                if (gate != null && gate.tid == obj.optString("transfer_id")) {
+                    gate.latch.countDown()
+                }
+            }
             "file_reject" -> {
-                val reason = obj.optString("reason")
-                TransferBus.publish(TransferProgress(true, finished = true, error = reason))
-                onEvent("电脑端拒收", reason)
+                val reason = obj.optString("reason").ifBlank { "电脑端拒收" }
+                val gate = sendAck
+                val tid = obj.optString("transfer_id")
+                if (gate != null && (tid.isEmpty() || gate.tid == tid)) {
+                    // 正在等握手：交给发送线程收尾，进度与提示由它统一发
+                    gate.rejected = reason
+                    gate.latch.countDown()
+                } else {
+                    TransferBus.publish(TransferProgress(true, finished = true, error = reason))
+                    onEvent("电脑端拒收", reason)
+                }
             }
             "file_result" -> {
                 if (!obj.optBoolean("ok", true)) {
@@ -240,11 +330,13 @@ class FileTransferManager(
             // 上一轮没收到 file_end（异常），先收尾再开新的
             receive?.let { finishReceive(it, ok = false, reason = "上传输未完成") }
         }
-        val session = ReceiveSession(transferId, name, size)
+        // 文件名来自电脑端帧，不能直接当路径用：`../` 能写出下载目录
+        val safeName = sanitizeName(name)
+        val session = ReceiveSession(transferId, safeName, size)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, name)
+                    put(MediaStore.Downloads.DISPLAY_NAME, safeName)
                     put(MediaStore.Downloads.MIME_TYPE, mime.ifBlank { "application/octet-stream" })
                     put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$SUB_DIR")
                     put(MediaStore.Downloads.IS_PENDING, 1)
@@ -254,9 +346,15 @@ class FileTransferManager(
                 session.uri = uri
                 session.stream = context.contentResolver.openOutputStream(uri)
             } else {
+                // Android 9 及以下写公共下载目录要 WRITE_EXTERNAL_STORAGE，
+                // 没授权就别静默失败，明确告诉电脑端原因
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    != PackageManager.PERMISSION_GRANTED) {
+                    throw IllegalException("Android 9 及以下接收文件需要存储权限，请在系统设置里授予")
+                }
                 val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), SUB_DIR)
                 dir.mkdirs()
-                val target = uniqueFile(dir, name)
+                val target = uniqueFile(dir, safeName)
                 session.file = target
                 session.stream = target.outputStream()
             }
@@ -270,7 +368,7 @@ class FileTransferManager(
         receive = session
         client.sendText(JSONObject().put("type", "file_accept").put("transfer_id", transferId).toString())
         TransferBus.publish(
-            TransferProgress(sending = false, name = name, index = index, count = count,
+            TransferProgress(sending = false, name = safeName, index = index, count = count,
                 bytesDone = 0, bytesTotal = size)
         )
     }
@@ -357,11 +455,52 @@ class FileTransferManager(
             Log.w(TAG, "query name failed: ${e.message}")
         }
         if (size <= 0) {
-            // 有些 provider 不给 SIZE，退回流里数长度（大文件会慢，但总比发不出去强）
-            size = runCatching { context.contentResolver.openInputStream(uri)?.use { it.available().toLong() } }.getOrNull() ?: 0L
+            // 有些 provider 不给 SIZE。先取文件描述符的真实长度；
+            // 拿不到再完整读一遍数字节——available() 只是「当前不阻塞可读字节数」，
+            // 不是总长，用它会让声明尺寸与实际不符，电脑端 finish() 校验必然失败。
+            size = runCatching {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+            }.getOrDefault(-1L)
+            if (size <= 0) size = countBytes(uri)
         }
         val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
         return Triple(name, size, mime)
+    }
+
+    /** 完整读一遍只为了数长度（不发送）。大文件会慢，但总比发出去尺寸不符强。 */
+    private fun countBytes(uri: Uri): Long {
+        var total = 0L
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val buf = ByteArray(CHUNK)
+                while (!cancelFlag) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    total += n
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "count bytes failed: ${e.message}")
+            return 0L
+        }
+        return if (cancelFlag) 0L else total
+    }
+
+    /**
+     * 清洗电脑端传来的文件名，规则与电脑端 `files.sanitize_name` 对齐：
+     * 去目录部分、替换非法字符、避开 Windows 保留名、限长。
+     * 不清洗的话 `../../x` 这类名字能让我们写出下载目录。
+     */
+    private fun sanitizeName(raw: String): String {
+        var base = raw.replace('\\', '/').substringAfterLast('/').trim().trim('.', ' ')
+        base = base.map { if (it in "<>:\"/\\|?*" || it.code < 32) '_' else it }.joinToString("")
+        if (base.isEmpty()) base = "文件"
+        // Windows 把首个点之前的整段当设备名，nul.a.b 照样是 NUL 设备
+        if (base.substringBefore('.').lowercase() in RESERVED) base = "_$base"
+        val dot = base.lastIndexOf('.')
+        val stem = if (dot > 0) base.substring(0, dot) else base
+        val ext = if (dot > 0) base.substring(dot) else ""
+        return stem.take(120) + ext.take(20)
     }
 
     private fun uniqueFile(dir: File, name: String): File {

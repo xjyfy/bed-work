@@ -123,7 +123,7 @@ class RemoteMicService:
                 self._config[key] = fresh[key]
         logger.info("config reloaded from disk")
         # 文件接收开关可能被改了：同步到在线客户端并通知手机端按钮状态
-        for c in self._clients:
+        for c in self._clients_snapshot():
             remote = next((r for r in self._config.get("remotes", []) if r.get("id") == c.remote_id), None)
             if remote is None:
                 continue
@@ -138,6 +138,15 @@ class RemoteMicService:
 
     # ------------------------------------------------------------------ 状态
 
+    def _clients_snapshot(self) -> list[_Client]:
+        """跨线程读客户端列表的唯一入口。
+
+        列表由 asyncio 线程增删，托盘/设置页线程也会读；不加锁遍历可能撞上
+        正在进行的 remove，拿到半更新的状态。
+        """
+        with self._lock:
+            return list(self._clients)
+
     def _status_frame(self) -> dict:
         clients = [
             {
@@ -148,7 +157,7 @@ class RemoteMicService:
                 "reconnects": max(0, self._conn_counts.get(c.remote_id, 1) - 1),
                 "uptime_s": int(time.monotonic() - c.connected_at),
             }
-            for c in sorted(self._clients, key=lambda x: x.seq)
+            for c in sorted(self._clients_snapshot(), key=lambda x: x.seq)
         ]
         return {
             "type": "status",
@@ -167,7 +176,7 @@ class RemoteMicService:
 
     async def _broadcast_status(self) -> None:
         base = self._status_frame()
-        for c in list(self._clients):
+        for c in self._clients_snapshot():
             frame = dict(base)
             frame["active"] = c.remote_id == self._active_id
             try:
@@ -177,18 +186,20 @@ class RemoteMicService:
         self._sync_tray()
 
     def _sync_tray(self) -> None:
-        if self._tray is not None:
-            self._tray.set_remotes(
-                [(c.remote_id, c.name, c.remote_id == self._active_id) for c in self._clients]
-            )
+        if self._tray is None:
+            return
+        with self._lock:
+            remotes = [(c.remote_id, c.name, c.remote_id == self._active_id) for c in self._clients]
             if not self._clients:
-                self._tray.set_status("未连接")
+                status = "未连接"
             else:
                 active = next((c for c in self._clients if c.remote_id == self._active_id), None)
-                self._tray.set_status(f"已连接 · {active.name}" if active else "已连接（待选）")
+                status = f"已连接 · {active.name}" if active else "已连接（待选）"
+        self._tray.set_state(remotes, status)
 
     def _find_client(self, remote_id: str) -> Optional[_Client]:
-        return next((c for c in self._clients if c.remote_id == remote_id), None)
+        with self._lock:
+            return next((c for c in self._clients if c.remote_id == remote_id), None)
 
     async def _close_quietly(self, ws: ServerConnection, timeout: float = 1.5) -> None:
         """带超时的关闭：死连接握手可能永远等不到回包，绝不能无限期阻塞。"""
@@ -273,13 +284,20 @@ class RemoteMicService:
             client.rx.abort()
             client.rx = None
         with self._lock:
-            if client in self._clients:
-                self._clients.remove(client)
-            if self._active_id == client.remote_id:
+            # 同一遥控器重连时，旧连接已被 _authenticate 移出列表，但它的 handler
+            # 仍会走到这里。必须按**对象身份**判断而不是 remote_id：新旧连接 ID 相同，
+            # 按 ID 判会把刚建好的新连接的控制权顺延给待命遥控器，并掐断它的语音。
+            if self._find_client(client.remote_id) is not client:
+                return
+            self._clients.remove(client)
+            was_active = self._active_id == client.remote_id
+            if was_active:
                 # 控制权顺延给最早连上的待命遥控器
                 self._active_id = min(self._clients, key=lambda c: c.seq).remote_id if self._clients else None
-        self._actioner.reset_modifiers()
-        self._audio.set_active(False)
+        # 只有当前控制者掉线才需要释放修饰键/停语音；待命遥控器掉线不该影响控制者
+        if was_active:
+            self._actioner.reset_modifiers()
+            self._audio.set_active(False)
         # B7：会话时长写进日志，配合"remote reconnect #n"判断是被杀（短会话后重连）还是正常退出
         logger.info(
             "remote disconnected: %s (session %.1f s, total connections %d)",
@@ -330,7 +348,8 @@ class RemoteMicService:
         return True
 
     def active_remote_names(self) -> list[tuple[str, str, bool]]:
-        return [(c.remote_id, c.name, c.remote_id == self._active_id) for c in self._clients]
+        with self._lock:
+            return [(c.remote_id, c.name, c.remote_id == self._active_id) for c in self._clients]
 
     # ------------------------------------------------------------------ 分发
 
@@ -344,21 +363,30 @@ class RemoteMicService:
         if not self._is_active(client):
             logger.info("ignored %s from standby remote %s", mtype, client.name)
             return
+        # mode / tab_index 原本只在建连时随 status 发一次，之后变了也不推，
+        # 手机端就永远显示不出「浮层中」与 Tab 序号。这里在真的变化时补一帧广播；
+        # 只在变化时发，避免每个方向键都刷一帧全量 status。
+        before = (self._actioner.alt_tab_active, self._actioner.tab_index)
         try:
+            # 注入/置前/写剪贴板都是阻塞调用（handle_launch 逐窗口置前含 sleep，
+            # handle_clip 最多重试 120ms），放线程里跑，别卡住事件循环。
+            # _handler 会 await 本次分发再读下一帧，所以同一连接的按键顺序不变。
             if mtype == "key":
-                self._actioner.handle_key(msg.get("code", ""), msg.get("action", "down"))
+                await asyncio.to_thread(
+                    self._actioner.handle_key, msg.get("code", ""), msg.get("action", "down")
+                )
             elif mtype == "send":
-                self._actioner.handle_send()
+                await asyncio.to_thread(self._actioner.handle_send)
             elif mtype == "voice":
-                self._actioner.handle_voice(msg.get("action", ""))
+                await asyncio.to_thread(self._actioner.handle_voice, msg.get("action", ""))
             elif mtype == "voice_toggle":
-                self._actioner.handle_voice_toggle(msg.get("action", "toggle"))
+                await asyncio.to_thread(self._actioner.handle_voice_toggle, msg.get("action", "toggle"))
             elif mtype == "launch":
-                self._actioner.handle_launch(str(msg.get("slot", "")))
+                await asyncio.to_thread(self._actioner.handle_launch, str(msg.get("slot", "")))
             elif mtype == "switcher":
-                self._actioner.handle_switcher(msg.get("action", ""))
+                await asyncio.to_thread(self._actioner.handle_switcher, msg.get("action", ""))
             elif mtype == "clip":
-                self._handle_clip(msg)
+                await asyncio.to_thread(self._handle_clip, msg)
             elif mtype == "screenshot":
                 await self._handle_screenshot(client)
             elif mtype == "mic":
@@ -377,6 +405,8 @@ class RemoteMicService:
                 logger.warning("unknown message type: %s", mtype)
         except Exception as exc:  # noqa: BLE001
             logger.error("dispatch %s failed: %s", mtype, exc)
+        if (self._actioner.alt_tab_active, self._actioner.tab_index) != before:
+            await self._broadcast_status()
 
     # ------------------------------------------------------------------ 远程粘贴
 
@@ -457,9 +487,9 @@ class RemoteMicService:
         if self._loop is None or not self._loop.is_running():
             return
         frame = self._apps_frame()
-        for client in list(self._clients):
+        for client in self._clients_snapshot():
             asyncio.run_coroutine_threadsafe(self._send_json(client, frame), self._loop)
-        logger.info("apps frame pushed to %d client(s)", len(self._clients))
+        logger.info("apps frame pushed to %d client(s)", len(self._clients_snapshot()))
         self._refresh_icons_async()
 
     def _warm_app_icons(self) -> None:
@@ -581,13 +611,18 @@ class RemoteMicService:
             "name": client.rx.name,
         })
 
-    def _feed_file_chunk(self, client: _Client, data: bytes) -> None:
-        """二进制块落到当前接收会话；写盘异常直接中止并告知手机。"""
+    async def _feed_file_chunk(self, client: _Client, data: bytes) -> None:
+        """二进制块落到当前接收会话；写盘异常直接中止并告知手机。
+
+        写盘放线程里：慢盘/杀毒扫描时一次 256KB 写入可能上百毫秒，
+        同步写会把事件循环连同其它遥控器的保活一起拖住。
+        _handler 逐块 await，所以同一文件的块顺序不会乱。
+        """
         rx = client.rx
         if rx is None:
             return
         try:
-            rx.write(data)
+            await asyncio.to_thread(rx.write, data)
         except Exception as exc:  # noqa: BLE001
             logger.error("write file chunk failed: %s", exc)
             self._abort_receive(client, str(exc))
@@ -599,7 +634,7 @@ class RemoteMicService:
             return
         client.rx = None
         try:
-            saved = rx.finish()
+            saved = await asyncio.to_thread(rx.finish)
         except Exception as exc:  # noqa: BLE001
             logger.warning("file end failed: %s", exc)
             rx.abort()
@@ -761,7 +796,7 @@ class RemoteMicService:
                         if raw[:4] == filex.MAGIC:
                             # 文件块，前缀 4 字节 MAGIC，剩余是数据（要和语音 PCM 区分）
                             if client is not None:
-                                self._feed_file_chunk(client, raw[4:])
+                                await self._feed_file_chunk(client, raw[4:])
                             continue
                         if client is not None and self._is_active(client):
                             self._audio_frames += 1
@@ -954,13 +989,24 @@ def _notify_already_running() -> None:
 
 
 def _load_or_init_config() -> dict:
-    """首次运行时自动生成 config.json；已存在则原样读取，**绝不覆盖**。
+    """首次运行自动生成 config.json；已存在则原样读取，**绝不覆盖**。
 
     之前缺 config.json 会直接抛 FileNotFoundError，双击启动只闪一下就退出，
-    用户完全看不到原因，因此改为自愈。
+    用户完全看不到原因，因此改为自愈。损坏（JSON 解析失败）同样自愈：
+    把坏文件改名留证再按默认重建，至少服务能起来重新扫码绑定。
     """
     if CONFIG_PATH.exists():
-        return load_config()
+        try:
+            return load_config()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            backup = CONFIG_PATH.with_name(CONFIG_PATH.name + ".corrupt")
+            try:
+                os.replace(CONFIG_PATH, backup)
+                logger.error("config.json 损坏（%s），已备份到 %s，按默认重建", exc, backup)
+            except OSError as os_exc:
+                logger.error("config.json 损坏且无法备份（%s）：%s", os_exc, exc)
+            save_config(default_config(), CONFIG_PATH)
+            return load_config()
 
     example = CONFIG_PATH.with_name("config.example.json")
     try:

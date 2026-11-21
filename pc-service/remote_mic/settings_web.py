@@ -15,6 +15,7 @@ import threading
 import webview
 
 from . import applist, store, driver
+from . import REPO_URL, __version__
 from . import files as filex
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,8 @@ tbody tr.sel { background:#cfe6ff !important; }
   <div class="grid2">
     <label>电脑名称</label><div><input type="text" id="computerName" style="width:280px"></div>
     <label>局域网地址</label><div id="addrline" class="hint">—</div>
+    <label>电脑端版本</label><div id="verline" class="hint">—</div>
+    <label>项目仓库</label><div class="hint"><a href="#" id="repoLink" style="color:#1a73e8">—</a></div>
   </div>
 </div>
 
@@ -280,6 +283,15 @@ async function boot() {
   document.getElementById('subline').textContent = '电脑名称与绑定信息仅在局域网内使用';
   document.getElementById('computerName').value = state.computer_name || '';
   document.getElementById('addrline').textContent = `${state.ip}:${state.port}`;
+  document.getElementById('verline').textContent = 'v' + (state.version || '?');
+  const repo = document.getElementById('repoLink');
+  repo.textContent = state.repo || '';
+  // pywebview 里 target=_blank 不一定能拉起系统浏览器，走 bridge 用默认浏览器打开
+  repo.onclick = async (e) => {
+    e.preventDefault();
+    const res = await pywebview.api.open_repo();
+    if (!res.ok) document.getElementById('subline').textContent = '打开仓库失败：' + (res.reason || '');
+  };
   renderRemotes();
   renderSlots();
   renderAudio();
@@ -612,11 +624,23 @@ class SettingsApi:
             "computer_name": str(cfg.get("computer_name") or store.computer_name()),
             "ip": store.lan_ip(),
             "port": int(cfg.get("port", 8765)),
+            "version": __version__,
+            "repo": REPO_URL,
             "remotes": self._remotes(),
             "slots": self._slots(),
             "audio": self._service.audio_status(),
             "files": self._files_state(),
         }
+
+    def open_repo(self) -> dict:
+        """用系统默认浏览器打开项目仓库（设置页里的链接）。"""
+        import webbrowser
+
+        try:
+            webbrowser.open(REPO_URL)
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": str(exc)}
 
     # ---------------------------------------------------------------- 文件互传
 

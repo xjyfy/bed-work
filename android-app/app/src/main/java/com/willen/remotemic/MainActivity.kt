@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var client: RemoteWsClient
     private lateinit var screenReceiver: android.content.BroadcastReceiver
+    private lateinit var recorderFailReceiver: android.content.BroadcastReceiver
     private var firstResume = true
 
     private val devices = mutableListOf<Device>()
@@ -70,6 +71,17 @@ class MainActivity : AppCompatActivity() {
     private var connected = false
     private var active = false
     private var voiceOn = false
+    /**
+     * 电脑端虚拟声卡是否就绪（`status.audio_ready`）。
+     * 未就绪时电脑端会直接丢弃 PCM，手机端必须禁用语音入口并说明原因，
+     * 否则用户对着手机说了半天、界面还显示"说话中"，电脑上一个字都没上屏。
+     * 默认 true：首帧 status 到达前不误禁用。
+     */
+    private var audioReady = true
+    /** 电脑端是否停在 Alt+Tab 切换浮层（`status.mode`）。 */
+    private var switcherMode = false
+    /** Ctrl+1..9 循环的当前位置（`status.tab_index`，0 = 还没切过）。 */
+    private var tabIndex = 0
     private var openMode = false
 
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -78,6 +90,8 @@ class MainActivity : AppCompatActivity() {
     private var suppressStopOnce = false
     private val waveAnimators = mutableListOf<ObjectAnimator>()
     private var deleteRepeat: Runnable? = null
+    /** 截图解码中：连点截屏会起一堆解码线程，这里同一时刻只允许一张在路上。 */
+    private var shotPending = false
 
     private val prefs by lazy { getSharedPreferences("remote_mic", MODE_PRIVATE) }
 
@@ -91,6 +105,9 @@ class MainActivity : AppCompatActivity() {
      * 不用再"关掉设置再重新打开"才能看到新电脑。
      */
     private var deviceListRefresh: (() -> Unit)? = null
+    /** 当前打开的设备抽屉 / 顶栏下拉：销毁界面时要一并收掉，否则窗口泄漏。 */
+    private var deviceSheet: BottomSheetDialog? = null
+    private var devicePopup: PopupWindow? = null
     private var transferProgressBar: ProgressBar? = null
     private var transferNameView: TextView? = null
     private var transferDetailView: TextView? = null
@@ -197,6 +214,29 @@ class MainActivity : AppCompatActivity() {
             showBindingDialog()
         }
         registerScreenReceiver()
+        registerRecorderFailReceiver()
+    }
+
+    /**
+     * 录音服务起不来（权限被拒 / 麦克风被占用）时会广播失败：
+     * 界面必须跟着退出"说话中"，否则波形一直动、通知栏却早已没有录音。
+     */
+    private fun registerRecorderFailReceiver() {
+        recorderFailReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: Intent?) {
+                cancelPendingVoiceStop()
+                voiceOn = false
+                openMode = false
+                suppressStopOnce = false
+                updateVoiceButton()
+            }
+        }
+        ContextCompat.registerReceiver(
+            this,
+            recorderFailReceiver,
+            android.content.IntentFilter(RecorderService.ACTION_START_FAILED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     /**
@@ -235,6 +275,29 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_PERM)
         }
     }
+
+    /**
+     * 权限结果：RECORD_AUDIO 被拒后必须给降级提示，否则点语音键会起一个
+     * 拿不到麦克风的前台服务（通知栏写着"正在录音"却一个字节都没有）。
+     */
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_PERM) return
+        val index = permissions.indexOf(Manifest.permission.RECORD_AUDIO)
+        if (index >= 0 && grantResults.getOrNull(index) != PackageManager.PERMISSION_GRANTED) {
+            toast("没有麦克风权限，语音功能不可用（可在系统设置里开启）")
+            updateVoiceButton()
+        }
+    }
+
+    /** 每次实时查权限：用户可能中途去系统设置里打开或关掉。 */
+    private fun micGranted(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
 
     // ------------------------------------------------------------------ 设备
 
@@ -295,6 +358,8 @@ class MainActivity : AppCompatActivity() {
             connected = false
             active = false
             resetVoiceState()
+            // 断线后电脑端的浮层/Tab 状态无从得知，复位成默认文案，别留着过期的指示
+            applyModeAndTab("normal", 0)
             renderHeader()
         }
 
@@ -303,6 +368,8 @@ class MainActivity : AppCompatActivity() {
             when (obj.optString("type")) {
                 "status" -> {
                     active = obj.optBoolean("active", active)
+                    applyAudioReady(obj.optBoolean("audio_ready", audioReady))
+                    applyModeAndTab(obj.optString("mode", "normal"), obj.optInt("tab_index", 0))
                     val computer = obj.optString("computer", "")
                     if (computer.isNotBlank() && current != null) {
                         // 电脑真名只有连上之后才知道（手动输入 IP 添加时只能先记 IP）：
@@ -316,14 +383,20 @@ class MainActivity : AppCompatActivity() {
                         renderHeader()
                     }
                 }
-                "auth_ok" -> fileTransfer.allowed = obj.optBoolean("files_allowed", true)
+                "auth_ok" -> {
+                    fileTransfer.allowed = obj.optBoolean("files_allowed", true)
+                    // auth_ok 里嵌了一份 status，首帧就能知道声卡就绪与否
+                    obj.optJSONObject("status")?.let {
+                        applyAudioReady(it.optBoolean("audio_ready", audioReady))
+                    }
+                }
                 "files_allowed" -> {
                     fileTransfer.allowed = obj.optBoolean("allow", true)
                     toast(if (fileTransfer.allowed) "电脑端已允许传文件" else "电脑端已关闭文件接收")
                 }
                 "screenshot" -> onScreenshot(obj)
                 "apps" -> onAppsFrame(obj)
-                "file_offer", "file_end", "file_reject", "file_result" -> fileTransfer.onText(obj)
+                "file_offer", "file_ack", "file_end", "file_reject", "file_result" -> fileTransfer.onText(obj)
             }
         }
 
@@ -346,10 +419,16 @@ class MainActivity : AppCompatActivity() {
         val host = obj.optString("host", "")
         val token = obj.optString("token", "")
         if (host.isBlank() || token.isBlank()) return null
+        // host 会被直接拼进 "ws://$host:$port"：只要含 / @ : 空格 等字符，OkHttp 就会把它
+        // 解析成另一台主机或另一个端口（恶意二维码可借此把手机引到攻击者的机器）。
+        // 这里只放行 IPv4 / 主机名字符集，端口也必须在合法范围内，否则当作格式不对。
+        if (!HOST_PATTERN.matches(host)) return null
+        val port = obj.optInt("port", 8765)
+        if (port !in 1..65535) return null
         return Device(
             name = obj.optString("name", host),
             host = host,
-            port = obj.optInt("port", 8765),
+            port = port,
             token = token
         )
     }
@@ -483,6 +562,8 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
         ))
 
+        // 连点顶栏不该叠出多个下拉；同时记到字段上，onDestroy 好收掉
+        devicePopup?.dismiss()
         popup = PopupWindow(
             content,
             dp(280),
@@ -493,6 +574,7 @@ class MainActivity : AppCompatActivity() {
             elevation = dp(14).toFloat()
             setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
         }
+        devicePopup = popup
         popup?.showAsDropDown(
             binding.tvDevice,
             (binding.tvDevice.width - dp(280)) / 2,
@@ -504,7 +586,14 @@ class MainActivity : AppCompatActivity() {
     private fun showBindingDialog() {
         if (isFinishing || isDestroyed) return
 
+        // 认证失败时会再弹一次，旧抽屉若还开着就会叠两层；而且旧 sheet 的 dismiss 回调
+        // 会把新 sheet 的刷新函数清掉。先收掉旧的，dismiss 回调只认"自己仍是当前 sheet"。
+        val previous = deviceSheet
+        deviceSheet = null
+        previous?.let { runCatching { it.dismiss() } }
+
         val sheet = BottomSheetDialog(this)
+        deviceSheet = sheet
         val view = layoutInflater.inflate(R.layout.dialog_device, null)
         sheet.setContentView(view)
         sheet.behavior.peekHeight = (resources.displayMetrics.heightPixels * 0.55f).toInt()
@@ -513,6 +602,7 @@ class MainActivity : AppCompatActivity() {
         val closeIcon = view.findViewById<View>(R.id.btnCloseSheetIcon)
         val closeText = view.findViewById<View>(R.id.btnCloseSheet)
         val scan = view.findViewById<View>(R.id.btnScanBind)
+        view.findViewById<TextView>(R.id.tvAppVersion).text = "手机遥控麦 v${appVersion()}"
 
         fun rebuild() {
             list.removeAllViews()
@@ -611,7 +701,14 @@ class MainActivity : AppCompatActivity() {
         closeText.click { sheet.dismiss() }
 
         deviceListRefresh = { rebuild() }
-        sheet.setOnDismissListener { deviceListRefresh = null }
+        sheet.setOnDismissListener {
+            // 只有"自己还是当前抽屉"时才清刷新函数：被新 sheet 顶掉的旧 sheet 迟到回调
+            // 不能把新 sheet 的 rebuild 清掉（否则列表不再随连接状态更新）。
+            if (deviceSheet === sheet) {
+                deviceSheet = null
+                deviceListRefresh = null
+            }
+        }
         sheet.setOnShowListener {
             sheet.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
                 ?.setBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -879,6 +976,11 @@ class MainActivity : AppCompatActivity() {
             toast("当前是待命状态，控制权不在这台手机")
             return
         }
+        // 连点会起多个解码线程、还会互相覆盖 ShotHolder 里的图，同一时刻只放一张在路上
+        if (shotPending) {
+            toast("上一张截图还在处理")
+            return
+        }
         send("screenshot")
     }
 
@@ -889,6 +991,7 @@ class MainActivity : AppCompatActivity() {
      * 交给 [ShotHolder] 传给查看页，退出即释放，不写任何文件。
      */
     private fun onScreenshot(obj: JSONObject) {
+        if (isFinishing || isDestroyed) return
         if (!obj.optBoolean("ok", false)) {
             toast("截屏失败：${obj.optString("reason", "未知原因")}")
             return
@@ -898,6 +1001,13 @@ class MainActivity : AppCompatActivity() {
             toast("截屏失败：没有收到图片")
             return
         }
+        // 查看页还在前台时不能换图：ShotHolder.set 会 recycle 旧 Bitmap，
+        // 而 ZoomImageView 正在画它，会直接崩 "Canvas: trying to use a recycled bitmap"。
+        if (shotPending || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+            android.util.Log.i("MainActivity", "screenshot dropped: busy or not resumed")
+            return
+        }
+        shotPending = true
         Thread {
             val bitmap = runCatching {
                 val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
@@ -914,8 +1024,18 @@ class MainActivity : AppCompatActivity() {
             }.getOrNull()
 
             runOnUiThread {
+                shotPending = false
+                // 界面已销毁就别再 startActivity（会抛异常/泄漏），图解出来也要就地回收
+                if (isFinishing || isDestroyed) {
+                    bitmap?.recycle()
+                    return@runOnUiThread
+                }
                 if (bitmap == null) {
                     toast("截图解码失败")
+                    return@runOnUiThread
+                }
+                if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                    bitmap.recycle()
                     return@runOnUiThread
                 }
                 com.willen.remotemic.shot.ShotHolder.set(bitmap)
@@ -939,7 +1059,8 @@ class MainActivity : AppCompatActivity() {
      * 电脑端推来的四个栏位（名称 + 图标 data URL）。
      *
      * 存进本地 prefs，下次冷启动没连上电脑也能先显示上次的图标/名称；
-     * 图标是 16~32px 的小 PNG，base64 一两 KB，直接放 prefs 没有压力。
+     * 图标是电脑应用自己的 256×256 PNG，四张 base64 合计可达数百 KB；
+     * 存 prefs 是为了冷启动没连上电脑时也能先显示上次的图标/名称。
      */
     private fun onAppsFrame(obj: JSONObject) {
         val slots = obj.optJSONArray("slots") ?: return
@@ -1006,6 +1127,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun startVoice() {
         if (voiceOn) return
+        if (!micGranted()) {
+            toast("没有麦克风权限，无法录音")
+            return
+        }
+        if (!audioReady) {
+            toast("电脑端虚拟声卡未就绪，请在电脑端设置页安装或重新探测声卡")
+            return
+        }
         voiceOn = true
         val intent = Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_START)
         androidx.core.content.ContextCompat.startForegroundService(this, intent)
@@ -1020,14 +1149,65 @@ class MainActivity : AppCompatActivity() {
         updateVoiceButton()
     }
 
+    /**
+     * 把电脑端的切换浮层状态与 Tab 序号显示到对应按键上。
+     *
+     * 不新增控件：直接改「切换应用」「切换 Tab」两个键的标签与颜色，
+     * 用户一眼能看出电脑现在停在浮层里（该用方向键+确定/取消）以及切到了第几个 Tab。
+     */
+    private fun applyModeAndTab(mode: String, index: Int) {
+        val inSwitcher = mode == "switcher"
+        if (inSwitcher != switcherMode) {
+            switcherMode = inSwitcher
+            binding.tvSwitcherLabel.text = if (inSwitcher) "浮层中" else "切换应用"
+            binding.tvSwitcherLabel.setTextColor(
+                ContextCompat.getColor(this, if (inSwitcher) R.color.accent else R.color.muted)
+            )
+            binding.btnSwitcher.contentDescription =
+                if (inSwitcher) "切换应用，电脑当前停在切换浮层：方向键移动、确定选中、取消退出"
+                else "切换应用"
+        }
+        if (index != tabIndex) {
+            tabIndex = index
+            binding.tvTabLabel.text = if (index > 0) "Tab $index" else "切换 Tab"
+            binding.tvTabLabel.setTextColor(
+                ContextCompat.getColor(this, if (index > 0) R.color.accent else R.color.muted)
+            )
+            binding.btnTabSwitch.contentDescription =
+                if (index > 0) "切换 Tab，当前第 $index 个" else "切换 Tab"
+        }
+    }
+
+    /** App 版本号，设备管理抽屉底部显示（用 PackageManager 取，不依赖 BuildConfig 开关）。 */
+    private fun appVersion(): String = runCatching {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    }.getOrDefault("?")
+
+    /** 声卡就绪状态变化：刷新语音键；变为未就绪时把正在进行的语音会话收掉。 */
+    private fun applyAudioReady(ready: Boolean) {
+        if (ready == audioReady) return
+        audioReady = ready
+        if (!ready && (voiceOn || openMode)) {
+            resetVoiceState()
+            toast("电脑端虚拟声卡未就绪，语音已停止")
+        }
+        updateVoiceButton()
+    }
+
     private fun updateVoiceButton() {
         val live = voiceOn || openMode
+        val usable = micGranted() && audioReady
         binding.tvVoiceTitle.text = if (live) "说话中" else "按住说话"
         binding.tvVoiceSub.text = when {
+            !micGranted() -> "无麦克风权限"
+            !audioReady -> "电脑声卡未就绪"
             openMode -> "点击结束"
             voiceOn -> "松手/点击结束"
             else -> "双击常开"
         }
+        // 不用 isEnabled=false：那样连按下缩放/震动都没了，用户不知道为啥按不动。
+        // 改为半透明 + 副标题说明原因，点击时给明确提示。
+        binding.btnVoice.alpha = if (usable) 1f else 0.5f
         binding.btnVoice.isActivated = live
         binding.ivVoiceIcon.visibility = if (live) View.GONE else View.VISIBLE
         binding.voiceWave.visibility = if (live) View.VISIBLE else View.GONE
@@ -1143,6 +1323,17 @@ class MainActivity : AppCompatActivity() {
         // 语音：按住临时说话；快速双击常开；常开态单击结束并退出常开
         binding.btnVoice.hold(
             down = {
+                // 没麦克风权限就不发 voice.down、也不起录音服务，只提示。
+                // 按钮不做 isEnabled=false：那样连触摸/震动反馈都没了，用户不知道为啥按不动。
+                if (!micGranted()) {
+                    toast("没有麦克风权限，去系统设置开启后再用语音")
+                    return@hold
+                }
+                // 声卡未就绪时不许开新会话；已在说话中则放行，让用户能正常结束
+                if (!audioReady && !voiceOn && !openMode) {
+                    toast("电脑端虚拟声卡未就绪，请在电脑端设置页安装或重新探测声卡")
+                    return@hold
+                }
                 val now = android.os.SystemClock.uptimeMillis()
                 val doubleTap = lastVoiceUpAt != 0L && (now - lastVoiceUpAt) in 1..400
                 cancelPendingVoiceStop()
@@ -1239,8 +1430,37 @@ class MainActivity : AppCompatActivity() {
         AudioBus.onPcm = null
         transferObserver?.let { TransferBus.forget(it) }
         transferObserver = null
+
+        // 挂着的窗口全部收掉：Activity 销毁后抽屉/下拉/进度浮窗还贴在 WindowManager 上就是窗口泄漏
+        devicePopup?.dismiss()
+        devicePopup = null
+        deviceSheet?.let { runCatching { it.dismiss() } }
+        deviceSheet = null
+        deviceListRefresh = null
         dismissTransferDialog()
+
+        // 录音前台服务跟着界面走：界面销毁后 voiceOn/openMode 归零，服务若还在跑，
+        // 就会出现"通知栏写着正在录音、界面却显示没开麦"的失同步。
+        val stopRecorder = Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_STOP)
+        runCatching { startService(stopRecorder) }
+            // 已在后台时 startService 会抛 IllegalStateException，退回 stopService（onDestroy 里同样会停采集）
+            .onFailure { runCatching { stopService(stopRecorder) } }
+
+        // 传输前台服务必须晚于 startForegroundService 满 6 秒才能停（见 stopTransferService），
+        // 不能跟着 uiHandler 一起清掉就完事：把"还没到点的那次停止"用 applicationContext 重排一遍，
+        // 回调不再引用 Activity；其余延迟回调（进度浮窗、语音停录、连删）全部清空，避免继续持有已销毁的界面。
+        val pendingTransferStop = transferServiceStarted && transferStopScheduled
+        val transferStartedAt = transferServiceStartedAt
+        uiHandler.removeCallbacksAndMessages(null)
+        if (pendingTransferStop) {
+            val appCtx = applicationContext
+            val wait = (6000L - (android.os.SystemClock.elapsedRealtime() - transferStartedAt))
+                .coerceAtLeast(600L)
+            uiHandler.postDelayed({ runCatching { TransferService.stop(appCtx) } }, wait)
+        }
+
         runCatching { unregisterReceiver(screenReceiver) }
+        runCatching { unregisterReceiver(recorderFailReceiver) }
         client.close()
         super.onDestroy()
     }
@@ -1250,5 +1470,8 @@ class MainActivity : AppCompatActivity() {
 
         /** 与电脑端 server.py 的 CLIP_MAX_CHARS 保持一致。 */
         private const val CLIP_MAX_CHARS = 100_000
+
+        /** 二维码 host 白名单：IPv4 / 主机名（字母数字点连字符），首尾必须是字母数字。见 parseQr。 */
+        private val HOST_PATTERN = Regex("^[A-Za-z0-9]([A-Za-z0-9.\\-]*[A-Za-z0-9])?$")
     }
 }

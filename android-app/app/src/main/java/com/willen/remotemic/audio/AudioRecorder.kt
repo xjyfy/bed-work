@@ -25,28 +25,58 @@ class AudioRecorder(private val onPcm: (ByteArray) -> Unit) {
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
+        // 设备不支持这组参数时返回 ERROR/ERROR_BAD_VALUE，拿它当缓冲大小会构造失败
+        if (minBuf <= 0) {
+            Log.e(TAG, "getMinBufferSize failed: $minBuf")
+            return false
+        }
         val bufferSize = maxOf(frameBytes * 4, minBuf)
 
-        val recorder = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize
-        )
+        // 权限被拒 / 麦克风被别的应用独占时，构造与 startRecording 都会直接抛异常，
+        // 不接住就会把录音前台服务（乃至整个进程）崩掉。
+        val recorder = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "AudioRecord create failed", t)
+            return false
+        }
         if (recorder.state != AudioRecord.STATE_INITIALIZED) {
             Log.e(TAG, "AudioRecord init failed")
-            recorder.release()
+            runCatching { recorder.release() }
             return false
         }
 
         record = recorder
-        recorder.startRecording()
+        try {
+            recorder.startRecording()
+        } catch (t: Throwable) {
+            Log.e(TAG, "startRecording failed", t)
+            record = null
+            runCatching { recorder.release() }
+            return false
+        }
+        if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            Log.e(TAG, "not recording after startRecording: ${recorder.recordingState}")
+            record = null
+            runCatching { recorder.release() }
+            return false
+        }
         running.set(true)
         worker = Thread {
             val buf = ByteArray(frameBytes)
             while (running.get()) {
-                val read = recorder.read(buf, 0, buf.size)
+                // 麦克风被抢走 / 已 release 时 read 会抛或返回负值，退出线程而不是崩
+                val read = runCatching { recorder.read(buf, 0, buf.size) }.getOrDefault(-1)
+                if (read < 0) {
+                    Log.w(TAG, "read failed: $read, stop worker")
+                    break
+                }
                 if (read > 0) {
                     onPcm(if (read == buf.size) buf else buf.copyOf(read))
                 }

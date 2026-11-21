@@ -15,8 +15,10 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- 绑定 token 明文存在 SharedPreferences：开着备份就会随自动备份上云、也能被 adb 导出。
+         自用工具不需要备份恢复，关掉最简单也最安全。 -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:usesCleartextTraffic="true"
         android:label="手机遥控麦"
         android:supportsRtl="true"

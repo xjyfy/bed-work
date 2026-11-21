@@ -100,18 +100,25 @@ def is_admin() -> bool:
 
 
 def _run_installer(exe: Path, flag: str) -> int:
-    """`-i`/`-u` + `-h`（隐藏界面）是 VB-Audio 官方支持的静默参数，实测退出码 0。"""
+    """`-i`/`-u` + `-h`（隐藏界面）是 VB-Audio 官方支持的静默参数，实测退出码 0。
+
+    返回 -1 = UAC 被取消，-2 = 安装器超时（不能让异常冒泡把 install() 整个崩掉）。
+    """
     args = f"{flag} -h"
     if is_admin():
-        proc = subprocess.run([str(exe), flag, "-h"], timeout=180,
-                              creationflags=CREATE_NO_WINDOW)
+        try:
+            proc = subprocess.run([str(exe), flag, "-h"], timeout=180,
+                                  creationflags=CREATE_NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            logger.warning("VB-CABLE installer timed out after 180s: %s", exe)
+            return -2
         return int(proc.returncode)
     # 未提权（开发期直跑 python）时弹一次 UAC，用户点"是"才继续
     rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", str(exe), args, None, 1)
     return 0 if rc > 32 else -1
 
 
-def install(wait_seconds: float = 20.0) -> dict:
+def install(wait_seconds: float = 120.0) -> dict:
     """安装驱动；已装则直接返回。返回 {ok, already, reason}。"""
     if detect_installed(force=True):
         return {"ok": True, "already": True, "reason": "", "installed": True}
@@ -123,9 +130,14 @@ def install(wait_seconds: float = 20.0) -> dict:
         }
     logger.info("installing VB-CABLE: %s", exe)
     rc = _run_installer(exe, "-i")
+    if rc == -2:
+        return {"ok": False, "already": False, "installed": False,
+                "reason": "安装器运行超时（180 秒），请稍后重试或手动安装 VB-CABLE"}
     if rc < 0:
         return {"ok": False, "already": False, "installed": False,
                 "reason": "需要管理员权限（已取消 UAC 授权）"}
+    # ShellExecuteW 立即返回，只能靠轮询设备节点判断装完；慢机器上驱动注册可能要
+    # 一两分钟，20 秒会误报失败，故默认放宽到 120 秒（每 1 秒探测一次）。
     deadline = time.time() + wait_seconds
     while time.time() < deadline:
         if detect_installed(force=True):
@@ -142,7 +154,13 @@ def uninstall() -> dict:
     if exe is None:
         return {"ok": False, "reason": "找不到 VB-CABLE 卸载程序"}
     rc = _run_installer(exe, "-u")
-    return {"ok": rc >= 0, "reason": "" if rc >= 0 else "需要管理员权限（已取消 UAC 授权）"}
+    if rc == -2:
+        reason = "卸载器运行超时（180 秒），请稍后重试"
+    elif rc < 0:
+        reason = "需要管理员权限（已取消 UAC 授权）"
+    else:
+        reason = ""
+    return {"ok": rc >= 0, "reason": reason}
 
 
 def status() -> dict:

@@ -24,6 +24,15 @@ if (-not (Test-Path $pyinstaller)) { throw "缺少 PyInstaller：uv pip install 
 if (-not (Test-Path 'pc-service\vendor\vb-cable\VBCABLE_Setup_x64.exe')) { throw '缺少 VB-CABLE 驱动包：pc-service\vendor\vb-cable\' }
 if (-not (Test-Path 'installer\redist\MicrosoftEdgeWebview2Setup.exe')) { throw '缺少 WebView2 引导器：installer\redist\' }
 
+# 版本号有两处：remote_mic/__init__.py（设置页显示）与 iss 的 AppVersion（安装包/卸载注册表）。
+# 不一致会让用户看到的版本和实际装的不是一个，打包前直接拦住。
+$pyVer = (& $py -c "import sys; sys.path.insert(0,'pc-service'); from remote_mic import __version__; print(__version__)")
+$issText = Get-Content 'installer\RemoteMic.iss' -Raw -Encoding UTF8
+if ($issText -notmatch '#define\s+AppVersion\s+"([^"]+)"') { throw 'iss 里找不到 #define AppVersion' }
+$issVer = $Matches[1]
+if ($pyVer -ne $issVer) { throw "版本号不一致：remote_mic/__init__.py=$pyVer，RemoteMic.iss=$issVer（两处都要改）" }
+Write-Host "      版本号一致：$pyVer"
+
 Write-Host '[1/3] PyInstaller 打包…'
 & $pyinstaller --noconfirm --clean 'pc-service\RemoteMicService.spec' --distpath 'pc-service\dist' --workpath 'pc-service\build'
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败（exit=$LASTEXITCODE）" }
