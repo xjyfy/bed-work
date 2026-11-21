@@ -54,6 +54,19 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <!-- 下拉快捷开关（控制中心磁贴）：点一下启动本应用。
+             exported 必须 true 并带 BIND_QUICK_SETTINGS_TILE，否则系统不认这个磁贴 -->
+        <service
+            android:name=".service.AppTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <!-- 文件传输期间的短时前台服务：只用于通知栏进度，传完立即停止 -->
         <service
             android:name=".service.TransferService"

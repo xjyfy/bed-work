@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">手机遥控麦</string>
+    <!-- 下拉快捷开关磁贴的显示名，太长会被系统截断，控制在 6 个字内 -->
+    <string name="tile_label">遥控麦</string>
 </resources>
