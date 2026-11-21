@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 from PIL import Image, ImageDraw
@@ -64,49 +65,79 @@ class Tray:
         # 而 pystray 的 _update_menu 会在**调用线程**上 DestroyMenu/重建 HMENU。
         # 不串行化就可能出现两个线程同时销毁/创建同一个菜单句柄。
         self._lock = threading.RLock()
+        # Shell_NotifyIcon / 重建菜单是同步调用 explorer 的 GDI 操作：任务栏忙
+        # （悬停缩略图预览 + 最大化视频）时可能 stall 数秒。**绝不能在 asyncio
+        # 循环里做**，否则 pong 超时→重连→再刷托盘→再 stall，自激成重连风暴。
+        # 这里只记状态，GDI 交给专用 worker 线程合并执行。
+        self._state_dirty = False
+        self._transfer_dirty = False
+        self._transfer = ""
+        self._wake = threading.Event()
+        self._worker: Optional[threading.Thread] = None
+        self._worker_stop = False
 
     # ------------------------------------------------------------------ 状态
 
     def set_state(self, remotes: list[tuple[str, str, bool]], status: str) -> None:
-        """一次性更新遥控器列表与状态文字，只重建一次菜单。
-
-        分开调 set_remotes + set_status 会连着重建两次菜单，把跨线程 GDI
-        竞态的窗口放大一倍；连接状态变化时这两者总是一起变。
-        """
+        """记录遥控器列表与状态文字；GDI 刷新由 worker 合并执行，调用方不阻塞。"""
         with self._lock:
             self._remotes = self._dedup(remotes)
             self._status = status
-            self._apply_icon()
-            self._refresh_menu()
+            self._state_dirty = True
+        self._wake.set()
 
     def set_status(self, status: str) -> None:
         with self._lock:
             self._status = status
-            self._apply_icon()
-            self._refresh_menu()
+            self._state_dirty = True
+        self._wake.set()
+
+    def _apply_title(self) -> None:
+        if self._icon is None:
+            return
+        base = f"手机遥控麦 - {self._status}"
+        self._icon.title = (f"{base} · {self._transfer}" if self._transfer else base)[:63]
 
     def _apply_icon(self) -> None:
         if self._icon is None:
             return
-        self._icon.title = f"手机遥控麦 - {self._status}"
         color = "#4CAF50" if self._remotes else "#9E9E9E"
         if self._remotes and not any(r[2] for r in self._remotes):
             color = "#FFA000"
         self._icon.icon = _make_icon_image(color)
+        self._apply_title()
 
     def set_transfer(self, text: str = "") -> None:
-        """把传输进度写进托盘 tooltip；空串恢复连接状态。
+        """记录传输进度 tooltip；空串恢复连接状态。实际刷新由 worker 执行。
 
         Windows 托盘 tooltip 上限 63 字符，超了会被截断甚至不刷新，这里主动裁。
         """
         with self._lock:
-            if self._icon is None:
-                return
-            try:
-                base = f"手机遥控麦 - {self._status}"
-                self._icon.title = (f"{base} · {text}" if text else base)[:63]
-            except Exception:  # noqa: BLE001 - tooltip 更新失败不能拖垮传输
-                logger.debug("tray title update failed", exc_info=True)
+            self._transfer = text
+            self._transfer_dirty = True
+        self._wake.set()
+
+    def _worker_loop(self) -> None:
+        while not self._worker_stop:
+            self._wake.wait()
+            self._wake.clear()
+            if self._worker_stop:
+                break
+            time.sleep(0.05)  # 合并短时间内的多次状态变化，避免高频 GDI
+            with self._lock:
+                if self._state_dirty:
+                    self._state_dirty = False
+                    self._apply_icon()
+                    self._refresh_menu()
+                if self._transfer_dirty:
+                    self._transfer_dirty = False
+                    self._apply_title()
+
+    def _start_worker(self) -> None:
+        if self._worker is None:
+            self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="tray-gdi")
+            self._worker.start()
+            self._wake.set()
 
     @staticmethod
     def _dedup(remotes: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
@@ -206,6 +237,7 @@ class Tray:
         with self._lock:
             self._icon = Icon("remote-mic", _make_icon_image("#9E9E9E"), "手机遥控麦", menu=self._menu())
             self._icon.title = "手机遥控麦 - 未连接"
+        self._start_worker()
         self._icon.run()
 
     def run_detached(self) -> None:
@@ -214,9 +246,12 @@ class Tray:
             self._icon = Icon("remote-mic", _make_icon_image("#9E9E9E"), "手机遥控麦", menu=self._menu())
             self._icon.title = "手机遥控麦 - 未连接"
             icon = self._icon
+        self._start_worker()
         icon.run_detached()
 
     def stop(self) -> None:
+        self._worker_stop = True
+        self._wake.set()
         with self._lock:
             icon = self._icon
         if icon is not None:

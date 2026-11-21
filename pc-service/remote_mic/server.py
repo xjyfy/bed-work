@@ -180,7 +180,8 @@ class RemoteMicService:
             frame = dict(base)
             frame["active"] = c.remote_id == self._active_id
             try:
-                await c.ws.send(json.dumps(frame, ensure_ascii=False))
+                # 死 socket 的发送缓冲可能已满，send 会一直等排空；加超时免得拖住循环
+                await asyncio.wait_for(c.ws.send(json.dumps(frame, ensure_ascii=False)), timeout=2)
             except Exception:  # noqa: BLE001
                 pass
         self._sync_tray()
@@ -524,13 +525,15 @@ class RemoteMicService:
             data, width, height = await asyncio.to_thread(screencap.capture_jpeg)
         except Exception as exc:  # noqa: BLE001
             logger.warning("screenshot failed: %s", exc)
-            await self._send_json(client, {"type": "screenshot", "ok": False, "reason": str(exc)})
+            await self._send_json(self._current_client(client), {"type": "screenshot", "ok": False, "reason": str(exc)})
             return
 
         payload = base64.b64encode(data).decode("ascii")
         logger.info("screenshot sent: %dx%d, %d KB", width, height, len(data) // 1024)
+        # 抓图期间这条连接可能已被同遥控器的新连接顶替（重连）；回包必须发给
+        # **当前**连接，否则手机收不到，表现为「截屏没反应」。
         await self._send_json(
-            client,
+            self._current_client(client),
             {
                 "type": "screenshot",
                 "ok": True,
@@ -540,6 +543,10 @@ class RemoteMicService:
                 "image": payload,
             },
         )
+
+    def _current_client(self, client: _Client) -> _Client:
+        """同一遥控器重连后返回新连接；遥控器已离线则返回原 client（发送会静默失败）。"""
+        return self._find_client(client.remote_id) or client
 
     async def _send_json(self, client: _Client, payload: dict) -> None:
         try:
