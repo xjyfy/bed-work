@@ -1,7 +1,7 @@
 """设置页（pywebview 弹窗，内嵌本地 HTML）。
 
-界面参考 Windows「应用和功能」：应用列表带图标 / 发布者 / 版本 / 安装时间 / 大小，
-发送快捷键改为下拉选择（无 / enter / ctrl+enter）。
+界面参考 Windows「应用和功能」：应用列表带图标 / 发布者 / 版本 / 安装时间 / 大小。
+快捷键（四个栏位的发送 / 新会话）是「点一下再按键」的捕获控件。
 """
 
 from __future__ import annotations
@@ -141,7 +141,8 @@ td.perms input[type=checkbox] { vertical-align:-2px; margin-right:3px; }
 .icoWrap img { width:20px; height:20px; border-radius:3px; object-fit:contain; display:block; }
 
 /* 快捷键捕获控件：点一下进入「请按组合键」状态，再按键即写入 */
-.hkcell { display:flex; flex-direction:column; gap:6px; }
+.hkcell { display:flex; align-items:center; gap:10px; }
+.hkrows { display:flex; flex-direction:column; gap:6px; }
 .hkrow { display:flex; align-items:center; gap:8px; }
 .hklabel { width:48px; font-size:12px; color:var(--muted); flex:0 0 48px; }
 .hkbtn {
@@ -358,22 +359,40 @@ function newChatLabel(slot) {
 }
 
 function startCapture(slot, kind, btn) {
-  if (capturing) stopCapture(true);
-  capturing = { slot, kind, btn, prev: btn.textContent };
+  if (capturing) stopCapture();
+  capturing = { slot, kind, btn };
   btn.classList.add('capturing');
   btn.textContent = '请按组合键…（退格=无 / Esc=取消）';
   btn.focus();
   document.addEventListener('keydown', onCaptureKey, true);
 }
 
-function stopCapture(restore) {
+/** 结束捕获：只更新这几个按钮的文字/配色，**不重建表格**。
+ *  早前这里调 renderSlots() 重建整表，会把刚点过的按钮引用作废、并冲掉异步补出来的应用图标。 */
+function stopCapture() {
   if (!capturing) return;
   document.removeEventListener('keydown', onCaptureKey, true);
-  const { slot, kind, btn, prev } = capturing;
   capturing = null;
-  btn.classList.remove('capturing');
-  renderSlots();   // 用最新状态重绘，标签/颜色都跟着变
-  if (restore && btn.isConnected) btn.textContent = prev;
+  updateHkUI();
+}
+
+/** 就地刷新四个栏位的键位按钮（文本 + 是否标红），依赖按钮 id 而不是闭包里的旧引用 */
+function updateHkUI() {
+  (state ? state.slots : []).forEach(s => {
+    const sendBtn = document.getElementById('hk-send-' + s.slot);
+    const ncBtn = document.getElementById('hk-nc-' + s.slot);
+    if (sendBtn) {
+      sendBtn.textContent = sendLabel(s.slot);
+      sendBtn.classList.toggle('none', !hkEdit.send[s.slot]);
+      sendBtn.classList.remove('capturing');
+    }
+    if (ncBtn) {
+      const nc = hkEdit.newchat[s.slot] || { mode: 'default' };
+      ncBtn.textContent = newChatLabel(s.slot);
+      ncBtn.classList.toggle('none', nc.mode === 'none');
+      ncBtn.classList.remove('capturing');
+    }
+  });
 }
 
 function onCaptureKey(e) {
@@ -381,29 +400,31 @@ function onCaptureKey(e) {
   e.preventDefault();
   e.stopPropagation();
   const { slot, kind } = capturing;
-  if (e.key === 'Escape') { stopCapture(true); return; }
+  if (e.key === 'Escape') { stopCapture(); return; }
   // 退格 = 无：发送键 = 不覆盖（回落），新会话键 = 该栏位禁用
   if (e.key === 'Backspace' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
     if (kind === 'send') hkEdit.send[slot] = '';
     else hkEdit.newchat[slot] = { mode: 'none', combo: '' };
-    stopCapture(false);
+    stopCapture();
     return;
   }
   const combo = comboOf(e);
   if (!combo) return;   // 只按了修饰键：等主键
   if (!isAllowedCombo(combo)) {
-    const b = capturing.btn;
-    b.textContent = prettyCombo(combo) + ' 不可用，换一个…';
+    if (capturing) capturing.btn.textContent = prettyCombo(combo) + ' 不可用，换一个…';
     return;
   }
   if (kind === 'send') hkEdit.send[slot] = combo;
   else hkEdit.newchat[slot] = { mode: 'custom', combo };
-  stopCapture(false);
+  stopCapture();
 }
 
-function resetNewChat(slot) {
+/** 恢复默认：发送键回到「无（回落 Enter）」，新会话键回到 Ctrl+N，两个一起复位 */
+function resetSlot(slot) {
+  if (capturing) stopCapture();
+  hkEdit.send[slot] = '';
   hkEdit.newchat[slot] = { mode: 'default', combo: '' };
-  renderSlots();
+  updateHkUI();
 }
 
 async function boot() {
@@ -431,10 +452,22 @@ async function loadIcons() {
   try {
     const icons = await pywebview.api.get_slot_icons();
     icons.forEach(x => {
+      // 写回 state：否则任何一次重绘（改快捷键、选完应用）都会把补好的图标冲掉
+      const s = state && state.slots.find(v => v.slot === x.slot);
+      if (s && x.icon) s.icon = x.icon;
       const wrap = document.getElementById('ico-' + x.slot);
       if (wrap && x.icon) wrap.innerHTML = `<img src="${x.icon}" alt="">`;
     });
   } catch (e) { /* 图标失败不影响使用 */ }
+}
+
+/** set_slot_app 返回的 slots 不带图标，合并时保留已经补好的那份，避免图标闪没 */
+function mergeSlots(fresh) {
+  (fresh || []).forEach(ns => {
+    const old = state.slots.find(o => o.slot === ns.slot);
+    if (old && old.icon && !ns.icon) ns.icon = old.icon;
+  });
+  state.slots = fresh;
 }
 
 function renderRemotes() {
@@ -553,14 +586,16 @@ function renderSlots() {
         <div class="apppath">${esc(s.path || '')}</div>
       </div></div></td>
       <td><div class="hkcell">
-        <div class="hkrow"><span class="hklabel">发送</span>
-          <button type="button" class="hkbtn"
-            onclick="startCapture('${esc(s.slot)}','send',this)">${sendTxt}</button></div>
-        <div class="hkrow"><span class="hklabel">新会话</span>
-          <button type="button" class="hkbtn${ncNone ? ' none' : ''}"
-            onclick="startCapture('${esc(s.slot)}','newchat',this)">${ncTxt}</button>
-          <button type="button" class="hkreset" title="恢复默认（Ctrl+N）"
-            onclick="resetNewChat('${esc(s.slot)}')">↺</button></div>
+        <div class="hkrows">
+          <div class="hkrow"><span class="hklabel">发送</span>
+            <button type="button" id="hk-send-${esc(s.slot)}" class="hkbtn"
+              onclick="startCapture('${esc(s.slot)}','send',this)">${sendTxt}</button></div>
+          <div class="hkrow"><span class="hklabel">新会话</span>
+            <button type="button" id="hk-nc-${esc(s.slot)}" class="hkbtn${ncNone ? ' none' : ''}"
+              onclick="startCapture('${esc(s.slot)}','newchat',this)">${ncTxt}</button></div>
+        </div>
+        <button type="button" class="hkreset" title="恢复默认：发送回落 Enter，新会话 Ctrl+N"
+          onclick="resetSlot('${esc(s.slot)}')">↺</button>
       </div></td>
       <td><button onclick="openPicker('${esc(s.slot)}')" style="white-space:nowrap">选择应用</button></td>`;
     tb.appendChild(tr);
@@ -685,8 +720,9 @@ function closePicker() {
 async function confirmPick() {
   if (!picked) return;
   const res = await pywebview.api.set_slot_app(pickTarget, picked.exe, picked.name);
-  state.slots = res.slots;
+  mergeSlots(res.slots);
   renderSlots();
+  loadIcons();     // 新选的应用还没图标，重绘后补一次
   closePicker();
 }
 
@@ -695,13 +731,14 @@ async function browseExe() {
   if (!res) return;
   picked = { name: res.name, exe: res.exe };
   const res2 = await pywebview.api.set_slot_app(pickTarget, res.exe, res.name);
-  state.slots = res2.slots;
+  mergeSlots(res2.slots);
   renderSlots();
+  loadIcons();
   closePicker();
 }
 
 async function saveAll(btn) {
-  if (capturing) stopCapture(true);
+  if (capturing) stopCapture();
   const payload = {
     computer_name: document.getElementById('computerName').value.trim(),
     slots: state.slots.map(s => {

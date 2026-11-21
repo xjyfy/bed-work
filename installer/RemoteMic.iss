@@ -26,7 +26,7 @@
 ;     装完后由 [Run] 重新拉起（自启项不变）。用户不再需要手动退托盘。
 
 #define AppName "手机遥控麦"
-#define AppVersion "1.1.5"
+#define AppVersion "1.1.6"
 #define AppExe "RemoteMicService.exe"
 
 [Setup]
