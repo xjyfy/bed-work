@@ -90,10 +90,39 @@ def ensure_basics(config: dict) -> dict:
     config.setdefault("slot_send_hotkey", {})
     config.setdefault("send_hotkey", {"default": ["enter"]})
     config.setdefault("download_dir", "")
-    # 老配置里没有这个字段的遥控器，默认允许接收文件
+    # 权限字段迁移：老配置只有 receive_files，没有截图权限的概念。
+    # 为了升级后行为不变（原来能传文件、也能截屏），用 receive_files 作为两个子权限的默认值。
     for remote in config.get("remotes", []):
         remote.setdefault("receive_files", True)
+        files_default = bool(remote.get("receive_files", True))
+        remote.setdefault("perm_files", files_default)
+        remote.setdefault("perm_shot", files_default)
+        # 「所有」= 一键全开的总闸；勾上时两个子项置灰。单独关掉任一项后总闸自动落下来。
+        remote.setdefault("perm_all", bool(remote.get("perm_files")) and bool(remote.get("perm_shot")))
     return config
+
+
+def remote_perms(remote: dict) -> tuple[bool, bool]:
+    """这台遥控器的有效权限 (可传文件, 可截屏)。「所有」勾上时两个都为真。"""
+    if remote.get("perm_all"):
+        return True, True
+    return bool(remote.get("perm_files", True)), bool(remote.get("perm_shot", True))
+
+
+def set_remote_perms(config: dict, remote_id: str, all_on: bool, files: bool, shot: bool) -> bool:
+    """设置页勾选后落盘：总闸与两个子权限同时维护，保持 receive_files 兼容旧版。"""
+    for r in config.get("remotes", []):
+        if str(r.get("id")) != str(remote_id):
+            continue
+        r["perm_all"] = bool(all_on)
+        if all_on:
+            files = shot = True
+        r["perm_files"] = bool(files)
+        r["perm_shot"] = bool(shot)
+        # 兼容：旧版电脑端/旧设置页只认 receive_files
+        r["receive_files"] = bool(files) or bool(shot)
+        return True
+    return False
 
 
 def new_remote(name: str = "新遥控器") -> dict:
@@ -106,6 +135,10 @@ def new_remote(name: str = "新遥控器") -> dict:
         "last_seen": "",
         # 是否允许这台遥控器往电脑传文件（默认开，可在设置页设备列表里单独关）
         "receive_files": True,
+        # 权限三件套：总闸 + 传文件 + 截图（默认全开，与旧行为一致）
+        "perm_all": True,
+        "perm_files": True,
+        "perm_shot": True,
     }
 
 

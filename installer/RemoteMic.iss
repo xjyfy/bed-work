@@ -1,4 +1,4 @@
-﻿; 手机遥控麦 —— Windows 安装包（Inno Setup 6）
+; 手机遥控麦 —— Windows 安装包（Inno Setup 6）
 ;
 ; 设计口径见 docs/history/打包与安装包需求_2026-11-20.md：
 ;   · 装到 %ProgramFiles%\RemoteMic（要装驱动，本来就需要管理员）
@@ -26,7 +26,7 @@
 ;     装完后由 [Run] 重新拉起（自启项不变）。用户不再需要手动退托盘。
 
 #define AppName "手机遥控麦"
-#define AppVersion "1.1.2"
+#define AppVersion "1.1.3"
 #define AppExe "RemoteMicService.exe"
 
 [Setup]

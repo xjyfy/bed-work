@@ -135,6 +135,8 @@ tbody tr.pick { cursor:pointer; }
 tbody tr.sel { background:#cfe6ff !important; }
 .panel .pfoot { padding:10px 18px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
 .hint { color:var(--muted); font-size:12px; }
+td.perms label { display:inline-block; margin-right:10px; white-space:nowrap; cursor:pointer; }
+td.perms input[type=checkbox] { vertical-align:-2px; margin-right:3px; }
 .icoWrap { width:20px; height:20px; display:inline-block; background:#e8eef6; border-radius:3px; flex:0 0 20px; }
 .icoWrap img { width:20px; height:20px; border-radius:3px; object-fit:contain; display:block; }
 </style>
@@ -195,7 +197,7 @@ tbody tr.sel { background:#cfe6ff !important; }
 <div class="card">
   <h2>已绑定遥控器</h2>
   <table>
-    <thead><tr><th style="width:28%">名称</th><th style="width:18%">上次 IP</th><th style="width:16%">绑定时间</th><th style="width:12%">状态</th><th style="width:14%">接收文件</th><th></th></tr></thead>
+    <thead><tr><th style="width:24%">名称</th><th style="width:16%">上次 IP</th><th style="width:14%">绑定时间</th><th style="width:11%">状态</th><th style="width:27%">权限</th><th></th></tr></thead>
     <tbody id="remotes"><tr><td colspan="6" class="hint">读取中…</td></tr></tbody>
   </table>
   <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
@@ -318,21 +320,52 @@ function renderRemotes() {
   }
   state.remotes.forEach(r => {
     const tr = document.createElement('tr');
+    const all = !!r.perm_all;
+    const on = (v) => (all || v ? 'checked' : '');
+    const dis = all ? 'disabled' : '';
     tr.innerHTML = `<td>${esc(r.name)}</td><td class="num">${esc(r.last_ip || '—')}</td>
       <td class="num">${esc(r.added || '—')}</td>
       <td>${r.online ? (r.active ? '控制中' : '在线·待命') : '离线'}</td>
-      <td><label class="hint" style="cursor:pointer"><input type="checkbox" ${r.receive_files ? 'checked' : ''}
-        onchange="toggleRemoteFiles('${esc(r.id)}', this.checked)" style="vertical-align:-2px"> 接收</label></td>
+      <td class="perms">
+        <label class="hint" title="全部授权：勾上后传文件与截图都放开"><input type="checkbox" ${all ? 'checked' : ''}
+          onchange="toggleRemoteAll('${esc(r.id)}', this.checked)"> 所有</label>
+        <label class="hint" title="允许这台遥控器往电脑传文件"><input type="checkbox" ${on(r.perm_files)} ${dis}
+          onchange="toggleRemotePerm('${esc(r.id)}', 'files', this.checked)"> 传文件</label>
+        <label class="hint" title="允许这台遥控器抓取电脑屏幕"><input type="checkbox" ${on(r.perm_shot)} ${dis}
+          onchange="toggleRemotePerm('${esc(r.id)}', 'shot', this.checked)"> 截图</label></td>
       <td style="text-align:right"><button class="danger" onclick="delRemote('${esc(r.id)}')">删除</button></td>`;
     tb.appendChild(tr);
   });
 }
 
-async function toggleRemoteFiles(id, allow) {
-  const res = await pywebview.api.set_remote_files(id, allow);
+/** 勾选「所有」= 一键全开；取消后两个子项恢复可点，但保持各自当前值 */
+async function toggleRemoteAll(id, on) {
+  const r = state.remotes.find(x => x.id === id);
+  if (!r) return;
+  const files = on ? true : r.perm_files;
+  const shot = on ? true : r.perm_shot;
+  await appRemotePerms(id, on, files, shot, on ? '已全部授权' : '已取消全部授权，可单独勾选');
+}
+
+/** 单独勾/取消某一项；一旦不是"两个都开"，总闸自动落下 */
+async function toggleRemotePerm(id, which, on) {
+  const r = state.remotes.find(x => x.id === id);
+  if (!r) return;
+  const files = which === 'files' ? on : r.perm_files;
+  const shot = which === 'shot' ? on : r.perm_shot;
+  const label = which === 'files' ? '传文件' : '截图';
+  await appRemotePerms(id, false, files, shot, (on ? '已允许' : '已禁止') + label);
+}
+
+async function appRemotePerms(id, all, files, shot, tip) {
+  const res = await pywebview.api.set_remote_perms(id, all, files, shot);
+  if (!res || !res.ok) {
+    document.getElementById('subline').textContent = '保存失败：' + ((res && res.reason) || '未知原因');
+    return;
+  }
   state.remotes = res.remotes;
   renderRemotes();
-  document.getElementById('subline').textContent = allow ? '已允许该遥控器传文件' : '已禁止该遥控器传文件';
+  document.getElementById('subline').textContent = tip + '（已实时同步到在线手机）';
 }
 
 function renderFiles() {
@@ -605,6 +638,7 @@ class SettingsApi:
         rows = []
         for r in self._service.config.get("remotes", []):
             rid = str(r.get("id", ""))
+            files, shot = store.remote_perms(r)
             rows.append(
                 {
                     "id": rid,
@@ -613,7 +647,11 @@ class SettingsApi:
                     "added": str(r.get("added", "")),
                     "online": rid in online,
                     "active": bool(online.get(rid)),
-                    "receive_files": bool(r.get("receive_files", True)),
+                    "receive_files": files,
+                    # 三档权限：总闸 / 传文件 / 截图
+                    "perm_all": bool(r.get("perm_all", files and shot)),
+                    "perm_files": files,
+                    "perm_shot": shot,
                 }
             )
         return rows
@@ -689,10 +727,22 @@ class SettingsApi:
             return {"ok": False, "reason": str(exc)}
 
     def set_remote_files(self, remote_id: str, allow: bool) -> dict:
+        """兼容旧设置页：只给"传文件"一项时，另一项保持原状。"""
         cfg = store.load_config()
         for r in cfg.get("remotes", []):
             if str(r.get("id")) == str(remote_id):
-                r["receive_files"] = bool(allow)
+                _, shot = store.remote_perms(r)
+                store.set_remote_perms(cfg, remote_id, False, bool(allow), shot)
+        store.save_config(cfg)
+        self._service.reload_config()
+        return {"ok": True, "remotes": self._remotes()}
+
+    def set_remote_perms(self, remote_id: str, all_on: bool, files: bool, shot: bool) -> dict:
+        """设置页权限三勾选：所有 / 传文件 / 截图。落盘后立刻把新权限推给在线手机端。"""
+        cfg = store.load_config()
+        ok = store.set_remote_perms(cfg, remote_id, bool(all_on), bool(files), bool(shot))
+        if not ok:
+            return {"ok": False, "reason": "未找到该设备", "remotes": self._remotes()}
         store.save_config(cfg)
         self._service.reload_config()
         return {"ok": True, "remotes": self._remotes()}

@@ -92,6 +92,8 @@ class MainActivity : AppCompatActivity() {
     private var deleteRepeat: Runnable? = null
     /** 截图解码中：连点截屏会起一堆解码线程，这里同一时刻只允许一张在路上。 */
     private var shotPending = false
+    /** 电脑端是否给这台设备开了截图权限（auth_ok / perms 帧同步）。 */
+    private var shotAllowed = true
 
     private val prefs by lazy { getSharedPreferences("remote_mic", MODE_PRIVATE) }
 
@@ -384,12 +386,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 "auth_ok" -> {
-                    fileTransfer.allowed = obj.optBoolean("files_allowed", true)
+                    applyPerms(obj, toastTip = false)
                     // auth_ok 里嵌了一份 status，首帧就能知道声卡就绪与否
                     obj.optJSONObject("status")?.let {
                         applyAudioReady(it.optBoolean("audio_ready", audioReady))
                     }
                 }
+                "perms" -> applyPerms(obj, toastTip = true)
                 "files_allowed" -> {
                     fileTransfer.allowed = obj.optBoolean("allow", true)
                     toast(if (fileTransfer.allowed) "电脑端已允许传文件" else "电脑端已关闭文件接收")
@@ -750,7 +753,7 @@ class MainActivity : AppCompatActivity() {
             return false
         }
         if (!fileTransfer.allowed) {
-            toast("电脑端已关闭这台遥控器的文件接收")
+            toast("权限受限，请在电脑端设置菜单授权。")
             return false
         }
         if (fileTransfer.isBusy()) {
@@ -758,6 +761,25 @@ class MainActivity : AppCompatActivity() {
             return false
         }
         return true
+    }
+
+    /** 电脑端权限下发：所有 / 传文件 / 截图。旧版只发 files_allowed 时也走这里兜底。 */
+    private fun applyPerms(obj: JSONObject, toastTip: Boolean) {
+        val oldFiles = fileTransfer.allowed
+        val oldShot = shotAllowed
+        val perms = obj.optJSONObject("perms")
+        if (perms != null) {
+            fileTransfer.allowed = perms.optBoolean("files", fileTransfer.allowed)
+            shotAllowed = perms.optBoolean("screenshot", shotAllowed)
+        } else {
+            fileTransfer.allowed = obj.optBoolean("files_allowed", fileTransfer.allowed)
+        }
+        if (toastTip && (oldFiles != fileTransfer.allowed || oldShot != shotAllowed)) {
+            toast(
+                "电脑端权限已更新：传文件" + (if (fileTransfer.allowed) "可用" else "已禁止") +
+                    "，截图" + (if (shotAllowed) "可用" else "已禁止")
+            )
+        }
     }
 
     /** 照片/视频：系统 Photo Picker（Android 13+ 的系统 UI，零存储权限） */
@@ -972,8 +994,9 @@ class MainActivity : AppCompatActivity() {
             toast("未连接电脑")
             return
         }
-        if (!active) {
-            toast("当前是待命状态，控制权不在这台手机")
+        // 截屏不再要求持有控制权（电脑端也只按权限开关判断），待命状态也能用
+        if (!shotAllowed) {
+            toast("权限受限，请在电脑端设置菜单授权。")
             return
         }
         // 连点会起多个解码线程、还会互相覆盖 ShotHolder 里的图，同一时刻只放一张在路上
@@ -993,7 +1016,12 @@ class MainActivity : AppCompatActivity() {
     private fun onScreenshot(obj: JSONObject) {
         if (isFinishing || isDestroyed) return
         if (!obj.optBoolean("ok", false)) {
-            toast("截屏失败：${obj.optString("reason", "未知原因")}")
+            if (obj.optString("reason") == "perm_denied") {
+                shotAllowed = false
+                toast("权限受限，请在电脑端设置菜单授权。")
+            } else {
+                toast("截屏失败：${obj.optString("reason", "未知原因")}")
+            }
             return
         }
         val b64 = obj.optString("image", "")

@@ -42,6 +42,7 @@ from .store import (
     find_remote_by_token,
     load_config,
     remove_remote,
+    remote_perms,
     save_config,
     touch_remote,
 )
@@ -62,22 +63,29 @@ RETRY_ON_REPLACED_TYPES = frozenset(
     {"screenshot", "file_ack", "file_reject", "file_result", "file_offer"}
 )
 
+# 「待命」（没拿到控制权的遥控器）也能发的消息：传文件、截屏，以及请求接管控制权。
+# 这些不涉及抢键盘焦点/出声，只受该设备自己的权限开关约束；其余控制类消息仍只有控制中那台能发。
+STANDBY_ALLOWED_TYPES = frozenset(
+    {"screenshot", "file_begin", "file_end", "file_abort", "file_accept", "switch_active"}
+)
+
 
 class _Client:
     __slots__ = (
         "remote_id", "name", "ws", "ip", "seq",
-        "allow_files", "rx", "rx_saved", "accept_events", "tx_lock",
+        "allow_files", "allow_shot", "rx", "rx_saved", "accept_events", "tx_lock",
         "connected_at",
     )
 
     def __init__(self, remote_id: str, name: str, ws: ServerConnection, ip: str, seq: int,
-                 allow_files: bool = True):
+                 allow_files: bool = True, allow_shot: bool = True):
         self.remote_id = remote_id
         self.name = name
         self.ws = ws
         self.ip = ip
         self.seq = seq
         self.allow_files = allow_files
+        self.allow_shot = allow_shot
         self.rx: Optional[filex.Receiver] = None      # 手机→电脑的当前接收会话
         self.rx_saved: list[str] = []                  # 本轮已落盘的文件名
         self.accept_events: dict[str, asyncio.Event] = {}  # 电脑→手机：手机接受传输的信号
@@ -132,19 +140,27 @@ class RemoteMicService:
             if key in fresh:
                 self._config[key] = fresh[key]
         logger.info("config reloaded from disk")
-        # 文件接收开关可能被改了：同步到在线客户端并通知手机端按钮状态
+        # 设置页改了权限：同步到**所有**在线客户端（不论是否持有控制权），
+        # 手机端收到后立刻更新按钮可用性；重连时 auth_ok 也会带一份最新的。
         for c in self._clients_snapshot():
             remote = next((r for r in self._config.get("remotes", []) if r.get("id") == c.remote_id), None)
             if remote is None:
                 continue
-            allow = bool(remote.get("receive_files", True))
-            if allow != c.allow_files:
-                c.allow_files = allow
-                if self._loop is not None and self._loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self._send_json(c, {"type": "files_allowed", "allow": allow}), self._loop
-                    )
-                logger.info("file receive switch for %s -> %s", c.name, allow)
+            files, shot = remote_perms(remote)
+            changed = (files != c.allow_files) or (shot != c.allow_shot)
+            c.allow_files = files
+            c.allow_shot = shot
+            if changed and self._loop is not None and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._send_json(c, {
+                        "type": "perms",
+                        "files": files,
+                        "screenshot": shot,
+                        "files_allowed": files,   # 旧版手机端只认这个
+                    }),
+                    self._loop,
+                )
+                logger.info("perms for %s -> files=%s shot=%s", c.name, files, shot)
 
     # ------------------------------------------------------------------ 状态
 
@@ -270,13 +286,15 @@ class RemoteMicService:
         self._conn_counts[remote_id] = reconnects + 1
         if reconnects:
             logger.info("remote reconnect #%d: %s (%s)", reconnects, device or remote.get("name"), ws.remote_address)
+        allow_files, allow_shot = remote_perms(remote)
         client = _Client(
             remote_id=remote_id,
             name=device or str(remote.get("name") or "遥控器"),
             ws=ws,
             ip=(ws.remote_address[0] if ws.remote_address else ""),
             seq=self._seq,
-            allow_files=bool(remote.get("receive_files", True)),
+            allow_files=allow_files,
+            allow_shot=allow_shot,
         )
         client.rx_saved = []
         with self._lock:
@@ -294,7 +312,9 @@ class RemoteMicService:
                     "active": active,
                     "computer": self._config.get("computer_name") or computer_name(),
                     "status": self._status_frame(),
-                    # 手机端据此决定「传文件」按钮是否可用
+                    # 这台设备在电脑端被授予的权限；手机端点按钮时据此提示/放行
+                    "perms": {"files": client.allow_files, "screenshot": client.allow_shot},
+                    # 旧手机端只认这个字段，留着兼容
                     "files_allowed": client.allow_files,
                 },
                 ensure_ascii=False,
@@ -390,7 +410,9 @@ class RemoteMicService:
         if mtype == "hello":
             logger.info("client hello: %s", msg.get("device"))
             return
-        if not self._is_active(client):
+        # 控制类消息（按键/发声/置前/剪贴板/麦克风）只有持有控制权的那台能发；
+        # 传文件、截屏、请求接管控制权在待命状态也放行（见 STANDBY_ALLOWED_TYPES）。
+        if not self._is_active(client) and mtype not in STANDBY_ALLOWED_TYPES:
             logger.info("ignored %s from standby remote %s", mtype, client.name)
             return
         # mode / tab_index 原本只在建连时随 status 发一次，之后变了也不推，
@@ -550,6 +572,14 @@ class RemoteMicService:
         抓图是阻塞 IO（几十到上百毫秒），放线程里跑，别卡住事件循环；
         图片只在内存中流转，不落盘。
         """
+        if not client.allow_shot:
+            # 电脑端没给这台设备截图权限：立刻回明确原因，手机端才不会干等超时
+            logger.info("screenshot denied for %s (perm off)", client.name)
+            await self._send_json(
+                self._current_client(client),
+                {"type": "screenshot", "ok": False, "reason": "perm_denied", "permission": "screenshot"},
+            )
+            return
         try:
             data, width, height = await asyncio.to_thread(screencap.capture_jpeg)
         except Exception as exc:  # noqa: BLE001

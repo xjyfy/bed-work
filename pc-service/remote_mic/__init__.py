@@ -5,6 +5,6 @@
 `build_installer.ps1` 会校验两者一致，不一致直接中止打包。
 """
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 REPO_URL = "https://github.com/xjyfy/bed-work"
