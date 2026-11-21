@@ -13,8 +13,8 @@ android {
         applicationId = "com.willen.remotemic"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.2.1"
+        versionCode = 5
+        versionName = "1.2.2"
     }
 
     // release 签名凭据放在仓库根 signing/keystore.properties（连同 keystore 一起被
